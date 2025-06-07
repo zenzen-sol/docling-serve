@@ -17,6 +17,7 @@ from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 from docling.datamodel.base_models import DocumentStream, InputFormat
 from docling.datamodel.document import ConversionResult
 from docling.datamodel.pipeline_options import (
+    AcceleratorOptions,
     OcrOptions,
     PdfBackend,
     PdfPipeline,
@@ -171,6 +172,8 @@ def _parse_vlm_pdf_opts(
     pipeline_options = VlmPipelineOptions(
         artifacts_path=artifacts_path,
         document_timeout=request.document_timeout,
+        # Enable FlashAttention for a significant performance boost on the GPU.
+        accelerator_options=AcceleratorOptions(cuda_use_flash_attention2=True),
     )
     pipeline_options.vlm_options = smoldocling_vlm_conversion_options
     if sys.platform == "darwin":

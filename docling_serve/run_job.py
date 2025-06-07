@@ -9,8 +9,13 @@ from typing import Any, Optional
 import requests
 import torch
 
-from docling.datamodel.base_models import DocumentStream
+from docling.datamodel.base_models import DocumentStream, InputFormat
 from docling.datamodel.document import ConversionResult
+from docling.datamodel.pipeline_options import (
+    AcceleratorOptions,
+    VlmPipelineOptions,
+    smoldocling_vlm_conversion_options,
+)
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
@@ -75,6 +80,9 @@ def main():
     Main entry point for the docling-serve job.
     This script is intended to be run as a Cloud Run Job.
     """
+    # Set the docling logger to DEBUG to get more granular progress.
+    logging.getLogger("docling").setLevel(logging.DEBUG)
+
     # Run diagnostics first
     log_gpu_diagnostics()
 
@@ -138,11 +146,22 @@ def main():
         )
 
         # 1. Set up the conversion options.
-        # We explicitly request the result as a file to handle large documents
-        # and avoid payload size limits when calling back to the API.
-        options = ConvertDocumentsOptions(pipeline="vlm", return_as_file=True)
-        pdf_format_option = get_pdf_pipeline_opts(options)
-        converter = get_converter(pdf_format_option)
+        # Create VLM pipeline options directly to work around a bug in DocumentConverter.
+        # This ensures the VLM pipeline is actually used.
+        pipeline_options = VlmPipelineOptions(
+            accelerator_options=AcceleratorOptions(cuda_use_flash_attention2=True)
+        )
+        pipeline_options.vlm_options = smoldocling_vlm_conversion_options
+
+        # Instantiate the VLM Pipeline and DocumentConverter directly.
+        vlm_pipeline = VlmPipeline(pipeline_options)
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_cls=VlmPipeline, pipeline_instance=vlm_pipeline
+                )
+            }
+        )
 
         # 2. Prepare the source document.
         file_name = Path(args.source_url).name.split("?")[0]
