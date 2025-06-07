@@ -134,7 +134,7 @@ def main():
             token=args.progress_callback_token,
             source_id=args.source_id,
             status="PROCESSING",
-            message="Job started. Initializing document converter.",
+            message="Conversion job status: [WORKING]",
         )
 
         # 1. Set up the conversion options.
