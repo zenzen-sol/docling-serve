@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 import requests
 import torch
+from pypdf import PdfReader
 
 from docling.datamodel.base_models import DocumentStream, InputFormat
 from docling.datamodel.document import ConversionResult
@@ -34,6 +35,7 @@ def send_progress_update(
     status: str,
     message: str,
     error: Optional[str] = None,
+    total_tokens_estimate: Optional[int] = None,
 ):
     """Sends a progress update to the provided callback URL."""
     if not callback_url:
@@ -45,6 +47,8 @@ def send_progress_update(
         payload = {"status": status, "message": message, "source_id": source_id}
         if error:
             payload["error"] = error
+        if total_tokens_estimate:
+            payload["total_tokens_estimate"] = total_tokens_estimate
 
         headers = {"Content-Type": "application/json"}
         if token:
@@ -156,15 +160,48 @@ def main():
     )
 
     try:
+        # 1. Download the file and estimate total tokens
+        _log.info("Downloading source file from URL...")
+        download_response = requests.get(args.source_url)
+        download_response.raise_for_status()
+        file_content_bytes = download_response.content
+        _log.info(f"Successfully downloaded {len(file_content_bytes)} bytes.")
+
+        # Create an in-memory stream for processing
+        file_stream = BytesIO(file_content_bytes)
+
+        # Estimate total tokens based on page count
+        total_tokens_estimate = None
+        try:
+            # pypdf is lightweight and won't load the whole doc into memory at once
+            pdf_reader = PdfReader(file_stream)
+            num_pages = len(pdf_reader.pages)
+            # Reset stream position after reading metadata
+            file_stream.seek(0)
+
+            # Based on logs, a conservative estimate is ~2000 tokens generated per page.
+            ESTIMATED_TOKENS_PER_PAGE = 2000
+            total_tokens_estimate = num_pages * ESTIMATED_TOKENS_PER_PAGE
+            _log.info(
+                f"Estimated token count for {num_pages} pages: {total_tokens_estimate}"
+            )
+        except Exception:
+            # If it's not a PDF or fails to parse, we can't estimate.
+            _log.warning(
+                "Could not estimate token count. File may not be a standard PDF."
+            )
+            file_stream.seek(0)
+
         send_progress_update(
             callback_url=progress_callback_url_with_id,
             token=args.progress_callback_token,
             source_id=args.source_id,
             status="PROCESSING",
-            message="Conversion job status: [WORKING]",
+            message="Conversion job started.",
+            total_tokens_estimate=total_tokens_estimate,
         )
 
-        # 1. Set up the conversion options.
+        # 2. Set up the conversion options.
         # Create VLM pipeline options directly to work around a bug in DocumentConverter.
         # This ensures the VLM pipeline is actually used.
         pipeline_options = VlmPipelineOptions(
@@ -182,20 +219,13 @@ def main():
             }
         )
 
-        # 2. Prepare the source document.
+        # 3. Prepare the source document.
         file_name = Path(args.source_url).name.split("?")[0]
-
-        _log.info(f"Downloading source file from URL for {file_name}...")
-        download_response = requests.get(args.source_url)
-        download_response.raise_for_status()  # Ensure the download was successful
-        file_content = download_response.content
-        _log.info(f"Successfully downloaded {len(file_content)} bytes.")
-
-        sources = [DocumentStream(name=file_name, stream=BytesIO(file_content))]
+        sources = [DocumentStream(name=file_name, stream=file_stream)]
 
         _log.info(f"Starting conversion for {file_name}...")
 
-        # 3. Run the conversion. This is the main, long-running step.
+        # 4. Run the conversion. This is the main, long-running step.
         results = converter.convert_all(sources)
         result: ConversionResult = next(results)
 
