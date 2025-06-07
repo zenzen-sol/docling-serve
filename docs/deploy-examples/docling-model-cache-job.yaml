@@ -12,7 +12,7 @@ spec:
         - name: loader
           image: ghcr.io/docling-project/docling-serve-cpu:main
           command:
-            - docling-tools
+            - docling
             - models
             - download
             - '--output-dir=/modelcache'

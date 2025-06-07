@@ -10,27 +10,23 @@ FROM ghcr.io/astral-sh/uv:0.7.9 AS uv
 FROM quay.io/sclorg/python-312-c9s:c9s AS base
 
 ###################################################################################################
-# Builder stage for generating the lock file                                                      #
+# Stage 1: Create the lock file.                                                                  #
+# This stage only re-runs if pyproject.toml changes.                                              #
 ###################################################################################################
-FROM base AS builder
+FROM base AS lock_builder
 USER 1001
 WORKDIR /opt/app-root/src
 COPY --chown=1001:0 pyproject.toml .
-RUN --mount=from=ghcr.io/astral-sh/uv:0.7.9,source=/uv,target=/bin/uv \
+RUN --mount=from=uv,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
     uv lock
 
 ###################################################################################################
-# Main build stage                                                                                #
+# Stage 2: Install dependencies into a virtual environment.                                       #
+# This is the heavy-lifting stage that gets cached. It only re-runs if the lock file changes.     #
 ###################################################################################################
-FROM base
-
+FROM base AS venv_builder
 USER 0
-
-###################################################################################################
-# OS Layer                                                                                        #
-###################################################################################################
-
 RUN --mount=type=bind,source=os-packages.txt,target=/tmp/os-packages.txt \
     dnf -y install --best --nodocs --setopt=install_weak_deps=False dnf-plugins-core && \
     dnf config-manager --best --nodocs --setopt=install_weak_deps=False --save && \
@@ -40,15 +36,33 @@ RUN --mount=type=bind,source=os-packages.txt,target=/tmp/os-packages.txt \
     dnf -y clean all && \
     rm -rf /var/cache/dnf
 
-RUN /usr/bin/fix-permissions /opt/app-root/src/.cache
+# Create a virtual environment
+RUN python3.12 -m venv /opt/app-root/venv
+ENV PATH="/opt/app-root/venv/bin:$PATH"
 
-ENV TESSDATA_PREFIX=/usr/share/tesseract/tessdata/
+# Install dependencies from the lock file
+WORKDIR /opt/app-root
+COPY --from=lock_builder /opt/app-root/src/uv.lock uv.lock
+COPY pyproject.toml pyproject.toml
+RUN --mount=from=uv,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/opt/app-root/src/.cache/uv \
+    uv sync \
+        --frozen \
+        --no-install-project \
+        --no-dev \
+        --extra cu124 \
+        --extra tesserocr \
+        --extra rapidocr
 
 ###################################################################################################
-# Docling layer                                                                                   #
+# Stage 3: Build the final, lean application image.                                               #
 ###################################################################################################
-
+FROM base
 USER 1001
+
+# Copy the pre-built virtual environment from the venv_builder stage
+COPY --from=venv_builder --chown=1001:0 /opt/app-root/venv /opt/app-root/venv
+ENV PATH="/opt/app-root/venv/bin:$PATH"
 
 WORKDIR /opt/app-root/src
 
@@ -60,37 +74,27 @@ ENV \
     PYTHONIOENCODING=utf-8 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_PROJECT_ENVIRONMENT=/opt/app-root \
-    DOCLING_SERVE_ARTIFACTS_PATH=/opt/app-root/src/.cache/docling/models
+    # Point to the new virtual environment
+    UV_PROJECT_ENVIRONMENT=/opt/app-root/venv \
+    DOCLING_SERVE_ARTIFACTS_PATH=/opt/app-root/src/.cache/docling/models \
+    TESSDATA_PREFIX=/usr/share/tesseract/tessdata/
 
 ARG UV_SYNC_EXTRA_ARGS=""
-
-RUN --mount=from=ghcr.io/astral-sh/uv:0.7.9,source=/uv,target=/bin/uv \
-    --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
-    --mount=from=builder,source=/opt/app-root/src/uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    umask 002 && \
-    FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE uv sync \
-        --frozen \
-        --no-install-project \
-        --no-dev \
-        --extra cu124 \
-        --extra tesserocr \
-        --extra rapidocr
-
 ARG MODELS_LIST="layout tableformer picture_classifier easyocr smoldocling"
 
+# Copy and install the application code itself
+COPY --chown=1001:0 ./docling_serve ./docling_serve
+COPY --chown=1001:0 pyproject.toml .
+RUN --mount=from=uv,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
+    umask 002 && uv pip install . --no-deps ${UV_SYNC_EXTRA_ARGS:-}
+
+# Download models
 RUN echo "Downloading models..." && \
     HF_HUB_DOWNLOAD_TIMEOUT="90" \
     HF_HUB_ETAG_TIMEOUT="90" \
-    docling-tools models download -o "${DOCLING_SERVE_ARTIFACTS_PATH}" ${MODELS_LIST} && \
+    docling models download -o "${DOCLING_SERVE_ARTIFACTS_PATH}" ${MODELS_LIST} && \
     chown -R 1001:0 ${DOCLING_SERVE_ARTIFACTS_PATH} && \
     chmod -R g=u ${DOCLING_SERVE_ARTIFACTS_PATH}
 
-COPY --chown=1001:0 ./docling_serve ./docling_serve
-RUN --mount=from=ghcr.io/astral-sh/uv:0.7.9,source=/uv,target=/bin/uv \
-    --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    umask 002 && uv pip install . --no-deps ${UV_SYNC_EXTRA_ARGS}
-
-ENTRYPOINT ["python", "-m", "docling_serve.run_job"] 
+ENTRYPOINT ["python", "-m", "docling_serve.run_job"]
