@@ -12,9 +12,9 @@ spec:
         - name: loader
           image: ghcr.io/docling-project/docling-serve-cpu:main
           command:
-            - docling
-            - models
-            - download
+            - python
+            - -m
+            - docling.cli.models
             - '--output-dir=/modelcache'
             - 'layout'
             - 'tableformer'

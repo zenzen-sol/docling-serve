@@ -45,9 +45,9 @@ This document provides examples for pre-loading docling models to a persistent v
             - name: loader
               image: ghcr.io/docling-project/docling-serve-cpu:main
               command:
-                - docling
-                - models
-                - download
+                - python
+                - -m
+                - docling.cli.models
                 - '--output-dir=/modelcache'
                 - 'layout'
                 - 'tableformer'
@@ -67,7 +67,7 @@ This document provides examples for pre-loading docling models to a persistent v
     ```
 
     The job will mount previously created persistent volume and execute command similar to how we would load models locally:
-    `docling models download --output-dir <MOUNT-PATH> [LIST_OF_MODELS]`
+    `python -m docling.cli.models --output-dir <MOUNT-PATH> [LIST_OF_MODELS]`
 
     In manifest, we specify desired models individually, or we can use `--all` parameter to download all models.
 
