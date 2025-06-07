@@ -34,6 +34,10 @@ class DoclingServeSettings(BaseSettings):
         extra="allow",
     )
 
+    mode: str = "server"
+    file_uri: Optional[str] = None
+    job_id: Optional[str] = None
+
     enable_ui: bool = False
     api_host: str = "localhost"
     artifacts_path: Optional[Path] = None

@@ -1,6 +1,8 @@
 import argparse
+import json
 import logging
 import time
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,6 +21,38 @@ logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
 
 
+def send_progress_update(
+    callback_url: Optional[str],
+    token: Optional[str],
+    source_id: str,
+    status: str,
+    message: str,
+    error: Optional[str] = None,
+):
+    """Sends a progress update to the provided callback URL."""
+    if not callback_url:
+        _log.warning("No progress callback URL provided. Skipping update.")
+        return
+
+    _log.info(f"Sending progress update: status='{status}', message='{message}'")
+    try:
+        payload = {"status": status, "message": message, "source_id": source_id}
+        if error:
+            payload["error"] = error
+
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        response = requests.post(
+            callback_url, json=payload, headers=headers, timeout=15
+        )
+        response.raise_for_status()
+        _log.info("Progress update sent successfully.")
+    except requests.RequestException as e:
+        _log.error(f"Failed to send progress update: {e}", exc_info=True)
+
+
 def log_gpu_diagnostics():
     """Logs detailed information about the CUDA environment."""
     _log.info("=" * 50)
@@ -34,16 +68,6 @@ def log_gpu_diagnostics():
     else:
         _log.error("❌ CUDA is NOT available. Processing will be VERY slow.")
     _log.info("=" * 50)
-
-
-def _progress_callback(event: str, message: str, **kwargs: Any) -> None:
-    """A simple callback to log progress events."""
-    # current time with milliseconds
-    current_time = (
-        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        + f".{int(time.time() * 1000) % 1000:03d}"
-    )
-    _log.info(f"[{current_time}] PIPELINE_EVENT: {event} - {message} {kwargs}")
 
 
 def main():
@@ -75,6 +99,18 @@ def main():
         required=True,
         help="The source_id from the database for status updates.",
     )
+    parser.add_argument(
+        "--progress-callback-url",
+        type=str,
+        required=False,
+        help="The callback URL to POST progress updates to.",
+    )
+    parser.add_argument(
+        "--progress-callback-token",
+        type=str,
+        required=False,
+        help="A shared secret to authenticate progress callbacks.",
+    )
     # We can add more arguments from ConvertDocumentsOptions later if needed
     # For now, we will use the defaults for the VLM pipeline.
 
@@ -84,29 +120,40 @@ def main():
     _log.info(f"  Source URL: {args.source_url}")
     _log.info(f"  Callback URL: {args.callback_url}")
     _log.info(f"  Source ID: {args.source_id}")
+    _log.info(f"  Progress Callback URL: {args.progress_callback_url}")
 
-    # TODO: Add logic to update the database status to "Processing"
-    # This will require database credentials to be securely provided to the job.
-    _log.info(f"Updating source {args.source_id} status to 'Processing' (placeholder).")
+    progress_callback_url_with_id = (
+        f"{args.progress_callback_url.rstrip('/')}/{args.source_id}"
+        if args.progress_callback_url
+        else None
+    )
 
     try:
+        send_progress_update(
+            callback_url=progress_callback_url_with_id,
+            token=args.progress_callback_token,
+            source_id=args.source_id,
+            status="PROCESSING",
+            message="Job started. Initializing document converter.",
+        )
+
         # 1. Set up the conversion options.
-        # We are hardcoding the VLM pipeline options for now.
-        # This can be made configurable with more command-line arguments if needed.
-        options = ConvertDocumentsOptions(pipeline="vlm")
-        pdf_format_option: PdfFormatOption = get_pdf_pipeline_opts(options)
-
-        # We need to manually construct the converter to inject our callback.
-        # The `get_converter` helper doesn't support this directly.
-        pdf_format_option.pipeline_cls = VlmPipeline
-        pdf_format_option.pipeline_options.progress_callback = _progress_callback
-
-        converter = DocumentConverter(pdf_format_option=pdf_format_option)
+        # We explicitly request the result as a file to handle large documents
+        # and avoid payload size limits when calling back to the API.
+        options = ConvertDocumentsOptions(pipeline="vlm", return_as_file=True)
+        pdf_format_option = get_pdf_pipeline_opts(options)
+        converter = get_converter(pdf_format_option)
 
         # 2. Prepare the source document.
-        # The 'name' can be extracted from the URL if necessary, but is not critical.
         file_name = Path(args.source_url).name.split("?")[0]
-        sources = [DocumentStream(name=file_name, url=args.source_url)]
+
+        _log.info(f"Downloading source file from URL for {file_name}...")
+        download_response = requests.get(args.source_url)
+        download_response.raise_for_status()  # Ensure the download was successful
+        file_content = download_response.content
+        _log.info(f"Successfully downloaded {len(file_content)} bytes.")
+
+        sources = [DocumentStream(name=file_name, stream=BytesIO(file_content))]
 
         _log.info(f"Starting conversion for {file_name}...")
 
@@ -115,30 +162,42 @@ def main():
         result: ConversionResult = next(results)
 
         if result.document:
-            _log.info(f"Conversion successful for {file_name}.")
-            document_json = result.document.model_dump_json()
-
-            # 4. POST the result to the callback URL.
-            _log.info(f"Sending result to callback URL: {args.callback_url}")
-            # In a real scenario, you'd want more robust error handling here.
-            response = requests.post(
-                args.callback_url,
-                data=document_json,
-                headers={"Content-Type": "application/json"},
+            _log.info(
+                f"Conversion successful for {file_name}. Preparing to send result as a file."
             )
+
+            # Use the Pydantic model's own .model_dump_json() method. This correctly
+            # serializes special Pydantic types (like AnyUrl) into a valid JSON string.
+            doc_json_str = result.document.model_dump_json()
+
+            # Create an in-memory binary stream to send as a file. This is the robust
+            # way to handle potentially large results and avoid API payload size limits.
+            with BytesIO(doc_json_str.encode("utf-8")) as f:
+                files = {"docling_file": ("docling.json", f, "application/json")}
+                _log.info(f"Sending result file to callback URL: {args.callback_url}")
+                response = requests.post(args.callback_url, files=files)
+
             response.raise_for_status()
             _log.info(f"Callback successful with status code: {response.status_code}")
 
         elif result.error:
             _log.error(f"Conversion failed for {file_name}: {result.error}")
-            # TODO: Add logic to update the database status to "Failed".
+            # This is now handled by the exception handler below.
             raise result.error
 
     except Exception as e:
         _log.error(
             f"An unexpected error occurred during job execution: {e}", exc_info=True
         )
-        # TODO: Add logic to update the database status to "Failed".
+        send_progress_update(
+            callback_url=progress_callback_url_with_id,
+            token=args.progress_callback_token,
+            source_id=args.source_id,
+            status="FAILED",
+            message="An unexpected error occurred during job execution.",
+            error=str(e),
+        )
+        # This is now handled by a callback to the API.
         raise
 
     _log.info("Job finished successfully.")

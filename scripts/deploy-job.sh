@@ -29,13 +29,12 @@ docker push "${FULL_IMAGE_PATH}"
 echo "Image pushed successfully."
 echo "Deploying image to Cloud Run job: ${CLOUD_RUN_JOB_NAME} in region: ${CLOUD_RUN_REGION}"
 
-gcloud run jobs deploy "${CLOUD_RUN_JOB_NAME}" \
+gcloud beta run jobs deploy "${CLOUD_RUN_JOB_NAME}" \
     --image "${FULL_IMAGE_PATH}" \
-    --platform managed \
     --region "${CLOUD_RUN_REGION}" \
     --cpu 4 \
     --memory 16Gi \
-    --task-timeout 86400 \
+    --task-timeout 3600 \
     --max-retries 1 \
     --set-env-vars DOCLING_SERVE_MAX_SYNC_WAIT=300 \
     --gpu 1 \
