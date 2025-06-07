@@ -21,6 +21,7 @@ from docling.pipeline.vlm_pipeline import VlmPipeline
 
 from docling_serve.datamodel.convert import ConvertDocumentsOptions
 from docling_serve.docling_conversion import get_converter, get_pdf_pipeline_opts
+from docling_serve.http_logging import HttpJsonLogHandler
 
 logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
@@ -123,6 +124,24 @@ def main():
     # For now, we will use the defaults for the VLM pipeline.
 
     args = parser.parse_args()
+
+    # If a progress callback URL is provided, set up the HTTP logger
+    if args.progress_callback_url:
+        # Note: We do not append the source_id here, as the handler will
+        # be used for generic log messages. The receiving API should handle
+        # associating the logs with the job via the source_id in the payload.
+        # However, for simplicity in this implementation, we will pass the full URL
+        # and assume the API can handle it.
+        # A more robust solution might involve a separate endpoint for logs.
+        progress_callback_url_with_id = (
+            f"{args.progress_callback_url.rstrip('/')}/{args.source_id}"
+        )
+        http_handler = HttpJsonLogHandler(
+            url=progress_callback_url_with_id, token=args.progress_callback_token
+        )
+        # We only want to see DEBUG messages from the 'docling' logger
+        http_handler.setLevel(logging.DEBUG)
+        logging.getLogger("docling").addHandler(http_handler)
 
     _log.info("Starting docling-serve job with the following arguments:")
     _log.info(f"  Source URL: {args.source_url}")
