@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "docling-serve"
 version = "0.11.0"  # DO NOT EDIT, updated automatically
@@ -7,7 +11,6 @@ authors = [
     {name="Michele Dolfi", email="dol@zurich.ibm.com"},
     {name="Guillaume Moutier", email="gmoutier@redhat.com"},
     {name="Anil Vishnoi", email="avishnoi@redhat.com"},
-    {name="Panos Vagenas", email="pva@zurich.ibm.com"},
     {name="Panos Vagenas", email="pva@zurich.ibm.com"},
     {name="Christoph Auer", email="cau@zurich.ibm.com"},
     {name="Peter Staar", email="taa@zurich.ibm.com"},
@@ -23,41 +26,31 @@ readme = "README.md"
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
-    # "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Typing :: Typed",
     "Programming Language :: Python :: 3"
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "docling[vlm]~=2.28",
     "mlx-vlm~=0.1.12; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "fastapi[standard]~=0.115",
-    "httpx~=0.28",
-    "kfp[kubernetes]>=2.10.0",
     "pydantic~=2.10",
     "pydantic-settings~=2.4",
     "python-multipart>=0.0.14,<0.1.0",
-    "typer~=0.12",
-    "uvicorn[standard]>=0.29.0,<1.0.0",
-    "websockets~=14.0",
+    "gcsfs>=2024.3.1",
+    "google-cloud-storage>=2.16.0",
+    "requests>=2.31.0",
+    "pypdf>=4.2.0",
+    "setuptools>=61.0"
 ]
 
 [project.optional-dependencies]
-ui = [
-    "gradio~=5.9",
-    "pydantic<2.11.0",  # fix compatibility between gradio and new pydantic 2.11
-]
 tesserocr = [
     "tesserocr~=2.7"
 ]
 rapidocr = [
     "rapidocr-onnxruntime~=1.4; python_version<'3.13'",
     "onnxruntime~=1.7",
-]
-cpu = [
-  "torch>=2.6.0",
-  "torchvision>=0.21.0",
 ]
 cu124 = [
   "torch>=2.6.0",
@@ -66,61 +59,21 @@ cu124 = [
 flash-attn = [
   "flash-attn~=2.7.0; sys_platform == 'linux' and platform_machine == 'x86_64'"
 ]
-
-[dependency-groups]
 dev = [
-    "asgi-lifespan~=2.0",
-    "mypy~=1.11",
-    "pre-commit-uv~=4.1",
-    "pytest~=8.3",
-    "pytest-asyncio~=0.24",
-    "pytest-check~=2.4",
-    "python-semantic-release~=7.32",
-    "ruff>=0.9.6",
+    "black",
+    "ruff",
+    "commitizen",
+    "pre-commit",
+    "uvicorn[standard]>=0.29.0,<1.0.0",
+    "websockets~=14.0",
 ]
-
-[tool.uv]
-package = true
-conflicts = [
-  [
-    { extra = "cpu" },
-    { extra = "cu124" },
-  ],
-  [
-    { extra = "cpu" },
-    { extra = "flash-attn" },
-  ],]
-environments = ["sys_platform != 'darwin' or platform_machine != 'x86_64'"]
-override-dependencies = [
-  "urllib3~=2.0"
-]
-
-[tool.uv.sources]
-torch = [
-  { index = "pytorch-cpu", extra = "cpu" },
-  { index = "pytorch-cu124", extra = "cu124" },
-]
-torchvision = [
-  { index = "pytorch-cpu", extra = "cpu" },
-  { index = "pytorch-cu124", extra = "cu124" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
 
 [tool.setuptools.packages.find]
 include = ["docling_serve*"]
 namespaces = true
 
 [project.scripts]
-docling-serve = "docling_serve.__main__:main"
+docling-serve = "docling_serve.run_job:main"
 
 [project.urls]
 Homepage = "https://github.com/docling-project/docling-serve"
@@ -239,3 +192,15 @@ branch = "main"
 parser_angular_allowed_types = "build,chore,ci,docs,feat,fix,perf,style,refactor,test"
 parser_angular_minor_types = "feat"
 parser_angular_patch_types = "fix,perf"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+docling = {git = "https://github.com/docling-project/docling.git", rev = "b71348a"}
+pydantic = "^2.7.1"
+requests = "^2.31.0"
+gcsfs = "^2024.3.1"
+google-cloud-storage = "^2.16.0"
+pypdf = "^4.2.0"
+
+[tool.poetry.group.dev.dependencies]
+# ... existing code ...

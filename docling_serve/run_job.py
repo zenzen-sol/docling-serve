@@ -1,10 +1,9 @@
 import argparse
-import json
 import logging
-import time
+import tempfile
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import requests
 import torch
@@ -20,9 +19,11 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
-from docling_serve.datamodel.convert import ConvertDocumentsOptions
-from docling_serve.docling_conversion import get_converter, get_pdf_pipeline_opts
-from docling_serve.http_logging import HttpJsonLogHandler
+from docling_serve.http_logging import (
+    HttpJsonLogHandler,
+    PageProgressLogHandler,
+)
+from docling_serve.storage import download_from_gcs
 
 logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
@@ -36,6 +37,8 @@ def send_progress_update(
     message: str,
     error: Optional[str] = None,
     total_tokens_estimate: Optional[int] = None,
+    processed_pages: Optional[int] = None,
+    total_pages: Optional[int] = None,
 ):
     """Sends a progress update to the provided callback URL."""
     if not callback_url:
@@ -47,8 +50,12 @@ def send_progress_update(
         payload = {"status": status, "message": message, "source_id": source_id}
         if error:
             payload["error"] = error
-        if total_tokens_estimate:
+        if total_tokens_estimate is not None:
             payload["total_tokens_estimate"] = total_tokens_estimate
+        if processed_pages is not None:
+            payload["processed_pages"] = processed_pages
+        if total_pages is not None:
+            payload["total_pages"] = total_pages
 
         headers = {"Content-Type": "application/json"}
         if token:
@@ -78,6 +85,119 @@ def log_gpu_diagnostics():
     else:
         _log.error("❌ CUDA is NOT available. Processing will be VERY slow.")
     _log.info("=" * 50)
+
+
+def run_conversion(
+    source_url, source_id, callback_url, progress_callback_url, progress_callback_token
+):
+    """The main conversion process."""
+    total_pages = 0
+    total_tokens_estimate = None
+    vlm_logger = None
+    page_progress_handler = None
+    file_stream = None
+
+    try:
+        # 1. Download the file to get page count and estimate tokens
+        with tempfile.NamedTemporaryFile() as temp_pdf:
+            download_from_gcs(source_url, temp_pdf.name)
+
+            # Estimate total tokens based on page count
+            try:
+                pdf_reader = PdfReader(temp_pdf.name)
+                total_pages = len(pdf_reader.pages)
+                ESTIMATED_TOKENS_PER_PAGE = 2000
+                total_tokens_estimate = total_pages * ESTIMATED_TOKENS_PER_PAGE
+                _log.info(
+                    f"Estimated token count for {total_pages} pages: {total_tokens_estimate}"
+                )
+            except Exception:
+                _log.warning(
+                    "Could not estimate token count. File may not be a standard PDF."
+                )
+
+            # Prepare the file stream for conversion
+            temp_pdf.seek(0)
+            file_stream = BytesIO(temp_pdf.read())
+
+        # 2. Set up logging if a callback is provided
+        if progress_callback_url:
+            page_progress_handler = PageProgressLogHandler(
+                url=progress_callback_url,
+                source_id=source_id,
+                total_pages=total_pages,
+                token=progress_callback_token,
+            )
+            vlm_logger = logging.getLogger("docling.models.hf_vlm_model")
+            vlm_logger.addHandler(page_progress_handler)
+            vlm_logger.setLevel(logging.DEBUG)
+
+        # 3. Send a starting progress update
+        send_progress_update(
+            callback_url=progress_callback_url,
+            token=progress_callback_token,
+            source_id=source_id,
+            status="PROCESSING",
+            message="Starting document conversion process.",
+            total_tokens_estimate=total_tokens_estimate,
+            total_pages=total_pages,
+        )
+
+        # 4. Set up the conversion options
+        pipeline_options = VlmPipelineOptions(
+            accelerator_options=AcceleratorOptions(cuda_use_flash_attention2=True)
+        )
+        pipeline_options.vlm_options = smoldocling_vlm_conversion_options
+        vlm_pipeline = VlmPipeline(pipeline_options)
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_cls=VlmPipeline, pipeline_instance=vlm_pipeline
+                )
+            }
+        )
+
+        # 5. Prepare the source document.
+        file_name = Path(source_url).name.split("?")[0]
+        sources = [DocumentStream(name=file_name, stream=file_stream)]
+
+        _log.info(f"Starting conversion for {file_name}...")
+
+        # 6. Run the conversion.
+        results = converter.convert_all(sources)
+        result: ConversionResult = next(results)
+
+        if result.document:
+            _log.info(
+                f"Conversion successful for {file_name}. Preparing to send result."
+            )
+            doc_json_str = result.document.model_dump_json()
+            with BytesIO(doc_json_str.encode("utf-8")) as f:
+                files = {"docling_file": ("docling.json", f, "application/json")}
+                response = requests.post(callback_url, files=files)
+            response.raise_for_status()
+            _log.info(f"Callback successful with status code: {response.status_code}")
+        elif result.error:
+            raise result.error
+
+    except Exception as e:
+        _log.error(
+            f"An unexpected error occurred during job execution: {e}", exc_info=True
+        )
+        send_progress_update(
+            callback_url=progress_callback_url,
+            token=progress_callback_token,
+            source_id=source_id,
+            status="FAILED",
+            message="An unexpected error occurred during job execution.",
+            error=str(e),
+        )
+        raise
+    finally:
+        if vlm_logger and page_progress_handler:
+            vlm_logger.removeHandler(page_progress_handler)
+        if file_stream:
+            file_stream.close()
 
 
 def main():
@@ -137,9 +257,7 @@ def main():
         # However, for simplicity in this implementation, we will pass the full URL
         # and assume the API can handle it.
         # A more robust solution might involve a separate endpoint for logs.
-        progress_callback_url_with_id = (
-            f"{args.progress_callback_url.rstrip('/')}/{args.source_id}"
-        )
+        progress_callback_url_with_id = f"{args.progress_callback_url}/{args.source_id}"
         http_handler = HttpJsonLogHandler(
             url=progress_callback_url_with_id, token=args.progress_callback_token
         )
@@ -147,125 +265,23 @@ def main():
         http_handler.setLevel(logging.DEBUG)
         logging.getLogger("docling").addHandler(http_handler)
 
-    _log.info("Starting docling-serve job with the following arguments:")
-    _log.info(f"  Source URL: {args.source_url}")
-    _log.info(f"  Callback URL: {args.callback_url}")
-    _log.info(f"  Source ID: {args.source_id}")
-    _log.info(f"  Progress Callback URL: {args.progress_callback_url}")
-
-    progress_callback_url_with_id = (
-        f"{args.progress_callback_url.rstrip('/')}/{args.source_id}"
-        if args.progress_callback_url
-        else None
-    )
+    _log.info(f"Starting job for source_id: {args.source_id}")
+    _log.info(f"  - Source URL: {args.source_url}")
+    _log.info(f"  - Callback URL: {args.callback_url}")
+    _log.info(f"  - Progress Callback URL: {progress_callback_url_with_id}")
+    _log.info("=" * 50)
 
     try:
-        # 1. Download the file and estimate total tokens
-        _log.info("Downloading source file from URL...")
-        download_response = requests.get(args.source_url)
-        download_response.raise_for_status()
-        file_content_bytes = download_response.content
-        _log.info(f"Successfully downloaded {len(file_content_bytes)} bytes.")
-
-        # Create an in-memory stream for processing
-        file_stream = BytesIO(file_content_bytes)
-
-        # Estimate total tokens based on page count
-        total_tokens_estimate = None
-        try:
-            # pypdf is lightweight and won't load the whole doc into memory at once
-            pdf_reader = PdfReader(file_stream)
-            num_pages = len(pdf_reader.pages)
-            # Reset stream position after reading metadata
-            file_stream.seek(0)
-
-            # Based on logs, a conservative estimate is ~2000 tokens generated per page.
-            ESTIMATED_TOKENS_PER_PAGE = 2000
-            total_tokens_estimate = num_pages * ESTIMATED_TOKENS_PER_PAGE
-            _log.info(
-                f"Estimated token count for {num_pages} pages: {total_tokens_estimate}"
-            )
-        except Exception:
-            # If it's not a PDF or fails to parse, we can't estimate.
-            _log.warning(
-                "Could not estimate token count. File may not be a standard PDF."
-            )
-            file_stream.seek(0)
-
-        send_progress_update(
-            callback_url=progress_callback_url_with_id,
-            token=args.progress_callback_token,
-            source_id=args.source_id,
-            status="PROCESSING",
-            message="Conversion job started.",
-            total_tokens_estimate=total_tokens_estimate,
+        run_conversion(
+            args.source_url,
+            args.source_id,
+            args.callback_url,
+            progress_callback_url_with_id,
+            args.progress_callback_token,
         )
-
-        # 2. Set up the conversion options.
-        # Create VLM pipeline options directly to work around a bug in DocumentConverter.
-        # This ensures the VLM pipeline is actually used.
-        pipeline_options = VlmPipelineOptions(
-            accelerator_options=AcceleratorOptions(cuda_use_flash_attention2=True)
-        )
-        pipeline_options.vlm_options = smoldocling_vlm_conversion_options
-
-        # Instantiate the VLM Pipeline and DocumentConverter directly.
-        vlm_pipeline = VlmPipeline(pipeline_options)
-        converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(
-                    pipeline_cls=VlmPipeline, pipeline_instance=vlm_pipeline
-                )
-            }
-        )
-
-        # 3. Prepare the source document.
-        file_name = Path(args.source_url).name.split("?")[0]
-        sources = [DocumentStream(name=file_name, stream=file_stream)]
-
-        _log.info(f"Starting conversion for {file_name}...")
-
-        # 4. Run the conversion. This is the main, long-running step.
-        results = converter.convert_all(sources)
-        result: ConversionResult = next(results)
-
-        if result.document:
-            _log.info(
-                f"Conversion successful for {file_name}. Preparing to send result as a file."
-            )
-
-            # Use the Pydantic model's own .model_dump_json() method. This correctly
-            # serializes special Pydantic types (like AnyUrl) into a valid JSON string.
-            doc_json_str = result.document.model_dump_json()
-
-            # Create an in-memory binary stream to send as a file. This is the robust
-            # way to handle potentially large results and avoid API payload size limits.
-            with BytesIO(doc_json_str.encode("utf-8")) as f:
-                files = {"docling_file": ("docling.json", f, "application/json")}
-                _log.info(f"Sending result file to callback URL: {args.callback_url}")
-                response = requests.post(args.callback_url, files=files)
-
-            response.raise_for_status()
-            _log.info(f"Callback successful with status code: {response.status_code}")
-
-        elif result.error:
-            _log.error(f"Conversion failed for {file_name}: {result.error}")
-            # This is now handled by the exception handler below.
-            raise result.error
-
     except Exception as e:
-        _log.error(
-            f"An unexpected error occurred during job execution: {e}", exc_info=True
-        )
-        send_progress_update(
-            callback_url=progress_callback_url_with_id,
-            token=args.progress_callback_token,
-            source_id=args.source_id,
-            status="FAILED",
-            message="An unexpected error occurred during job execution.",
-            error=str(e),
-        )
-        # This is now handled by a callback to the API.
+        _log.error(f"Job failed for source_id: {args.source_id}", exc_info=True)
+        # The exception is re-raised to ensure the Cloud Run Job fails correctly.
         raise
 
     _log.info("Job finished successfully.")
