@@ -21,7 +21,9 @@ class HttpJsonLogHandler(logging.Handler):
         Formats the log record and sends it to the specified URL.
         """
         log_entry = {
-            "timestamp": self.formatTime(record, self.datefmt),
+            "timestamp": record.asctime
+            if hasattr(record, "asctime")
+            else logging.Formatter().formatTime(record),
             "level": record.levelname,
             "message": self.format(record),
             "logger_name": record.name,
