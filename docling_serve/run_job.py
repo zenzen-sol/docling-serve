@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -98,6 +99,12 @@ def run_conversion(
     file_stream = None
 
     try:
+        # Enable GCS model caching (if configured)
+        if os.environ.get("USE_GCS_MODELS", "").lower() == "true":
+            from docling_serve.gcs_model_cache import setup_gcs_models
+
+            setup_gcs_models()
+            _log.info("GCS model caching initialized")
         # 1. Download the file to get page count and estimate tokens
         with tempfile.NamedTemporaryFile() as temp_pdf:
             download_from_gcs(source_url, temp_pdf.name)

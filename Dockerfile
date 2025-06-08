@@ -32,7 +32,8 @@ ENV \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     PYTHONIOENCODING=utf-8 \
-    TESSDATA_PREFIX=/usr/share/tesseract/tessdata/
+    TESSDATA_PREFIX=/usr/share/tesseract/tessdata/ \
+    USE_GCS_MODELS=true
 
 # Stage 2: Python dependencies (changes when dependencies change)
 FROM base AS dependencies

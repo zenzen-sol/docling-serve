@@ -23,7 +23,7 @@ FULL_IMAGE_PATH="${ARTIFACT_REGISTRY_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${
 echo "Building job image for linux/amd64: ${FULL_IMAGE_PATH}"
 
 # Build the container image for the correct production architecture, pointing to the correct Dockerfile and context
-docker build --platform linux/amd64 -t "${FULL_IMAGE_PATH}" -f ../Dockerfile.job ..
+docker build --platform linux/amd64 -t "${FULL_IMAGE_PATH}" -f ../Dockerfile ..
 
 echo "Build complete."
 echo "To push the image, run: gcloud auth configure-docker ${ARTIFACT_REGISTRY_REGION}-docker.pkg.dev && docker push ${FULL_IMAGE_PATH}"

@@ -24,9 +24,9 @@ This guide documents the Docker setup for `docling-serve` for Cloud Run Jobs, in
 
 ## 🐳 Current Docker Solutions
 
-### 1. `Dockerfile.job` - Production Ready (Current)
+### 1. `Dockerfile` - Production Ready with GCS Model Caching (Current)
 
-**Purpose**: Multi-stage build optimized for Cloud Run Jobs with flash-attn support
+**Purpose**: Multi-stage build optimized for Cloud Run Jobs with flash-attn support and GCS model caching
 
 **Key Features**:
 - ✅ **Multi-stage caching** (base → dependencies → models → final)
@@ -39,23 +39,9 @@ This guide documents the Docker setup for `docling-serve` for Cloud Run Jobs, in
 **Usage**:
 ```bash
 cd scripts
-./build.sh      # Uses Dockerfile.job
+./build.sh      # Uses standard Dockerfile
 ./deploy-job.sh # Deploy to Cloud Run Jobs
 ```
-
-### 2. `Dockerfile.gcs` - Future Optimization (Prepared)
-
-**Purpose**: Ultra-fast builds with runtime model loading from GCS
-
-**Key Features**:
-- ✅ **No model downloads during build** (5min builds vs 45min)
-- ✅ **Runtime model caching** from GCS bucket
-- ✅ **Google Cloud SDK included** for gsutil
-- ✅ **Same dependency optimization** as Dockerfile.job
-
-**Build Time**: ~5min consistently
-
-**Status**: Ready but not deployed yet
 
 ## 🔧 Technical Details
 
@@ -173,8 +159,7 @@ cp Dockerfile.gcs Dockerfile.job
 
 ```
 docling-serve/
-├── Dockerfile.job              # Current production Dockerfile
-├── Dockerfile.gcs              # Future GCS-optimized Dockerfile  
+├── Dockerfile                  # Production Dockerfile with GCS model caching
 ├── Containerfile               # Official upstream Dockerfile
 ├── scripts/
 │   ├── build.sh                # Build Docker image
@@ -197,10 +182,10 @@ docling-serve/
 ## 🤝 For New Developers
 
 1. **Read this guide first** to understand the context
-2. **Use `Dockerfile.job`** for current development
+2. **Use standard `Dockerfile`** for development
 3. **Don't modify `Containerfile`** (upstream project file)
-4. **Test locally when possible** to avoid long Cloud Build cycles
-5. **Ask about GCS setup** before implementing model changes
+4. **Models are cached in GCS** - no need to download during builds
+5. **Test locally when possible** to avoid long Cloud Build cycles
 
 ---
 
