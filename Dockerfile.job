@@ -1,32 +1,9 @@
-# We use a multi-stage build to avoid including the uv binary in the final image.
-# We're pinning to a specific version of uv to ensure reproducible builds.
-# renovate: datasource=docker depName=astral-sh/uv versioning=semver
-FROM ghcr.io/astral-sh/uv:0.7.9 AS uv
+# Simple, working Dockerfile for docling-serve job
+FROM quay.io/sclorg/python-312-c9s:c9s
 
-# The SCLorg images are the recommended base for Python on Red Hat systems.
-# They come with a non-root user and other security best practices.
-# We use a specific version for CentOS Stream 9 to ensure stability.
-# renovate: datasource=docker depName=quay.io/sclorg/python-312-c9s versioning=semver
-FROM quay.io/sclorg/python-312-c9s:c9s AS base
-
-###################################################################################################
-# Stage 1: Create the lock file.                                                                  #
-# This stage only re-runs if pyproject.toml changes.                                              #
-###################################################################################################
-FROM base AS lock_builder
-USER 1001
-WORKDIR /opt/app-root/src
-COPY --chown=1001:0 pyproject.toml .
-RUN --mount=from=uv,source=/uv,target=/bin/uv \
-    --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
-    uv lock
-
-###################################################################################################
-# Stage 2: Install dependencies into a virtual environment.                                       #
-# This is the heavy-lifting stage that gets cached. It only re-runs if the lock file changes.     #
-###################################################################################################
-FROM base AS venv_builder
 USER 0
+
+# Install system packages
 RUN --mount=type=bind,source=os-packages.txt,target=/tmp/os-packages.txt \
     dnf -y install --best --nodocs --setopt=install_weak_deps=False dnf-plugins-core && \
     dnf config-manager --best --nodocs --setopt=install_weak_deps=False --save && \
@@ -36,47 +13,33 @@ RUN --mount=type=bind,source=os-packages.txt,target=/tmp/os-packages.txt \
     dnf -y clean all && \
     rm -rf /var/cache/dnf
 
-# Create a virtual environment
-RUN python3.12 -m venv /opt/app-root/venv
-ENV PATH="/opt/app-root/venv/bin:$PATH"
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.cargo/bin:$PATH"
 
-# Just create the virtual environment - dependencies will be installed in final stage
-WORKDIR /opt/app-root
-
-###################################################################################################
-# Stage 3: Build the final, lean application image.                                               #
-###################################################################################################
-FROM base
 USER 1001
-
-# Copy the pre-built virtual environment from the venv_builder stage
-COPY --from=venv_builder --chown=1001:0 /opt/app-root/venv /opt/app-root/venv
-ENV PATH="/opt/app-root/venv/bin:$PATH"
-
 WORKDIR /opt/app-root/src
 
+# Set environment variables
 ENV \
-    # On container environments, always set a thread budget to avoid undesired thread congestion.
     OMP_NUM_THREADS=4 \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     PYTHONIOENCODING=utf-8 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    # Point to the new virtual environment
-    UV_PROJECT_ENVIRONMENT=/opt/app-root/venv \
     DOCLING_SERVE_ARTIFACTS_PATH=/opt/app-root/src/.cache/docling/models \
     TESSDATA_PREFIX=/usr/share/tesseract/tessdata/
 
-ARG UV_SYNC_EXTRA_ARGS=""
 ARG MODELS_LIST="layout tableformer picture_classifier easyocr smoldocling"
 
-# Copy and install the application code with ALL its dependencies
-COPY --chown=1001:0 ./docling_serve ./docling_serve
-COPY --chown=1001:0 pyproject.toml .
-RUN --mount=from=uv,source=/uv,target=/bin/uv \
-    --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
-    umask 002 && uv pip install .[cu124,tesserocr,rapidocr] ${UV_SYNC_EXTRA_ARGS:-}
+# Copy project files
+COPY --chown=1001:0 . .
+
+# Install project and all dependencies
+RUN uv venv /opt/app-root/venv && \
+    . /opt/app-root/venv/bin/activate && \
+    uv pip install .[cu124,tesserocr,rapidocr]
+
+ENV PATH="/opt/app-root/venv/bin:$PATH"
 
 # Download models
 RUN echo "Downloading models..." && \
