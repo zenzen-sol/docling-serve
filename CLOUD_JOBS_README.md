@@ -97,23 +97,6 @@ custom_vlm_options = smoldocling_vlm_conversion_options.model_copy(
 - **CPU**: 4 vCPUs  
 - **Timeout**: 60 minutes per job
 
-## 🐛 Common Issues
-
-### Build Fails
-**Symptom**: Docker build times out or fails
-**Solution**: Check Cloud Build logs, usually dependency issues
-
-### Job Times Out
-**Symptom**: Job stops after 60 minutes
-**Solution**: Large documents may need timeout increase in `deploy-job.sh`
-
-### GPU Not Available
-**Symptom**: "CUDA not available" in logs
-**Solution**: Check that job is deployed with GPU in Cloud Console
-
-### Flash-Attention Warnings
-**Symptom**: Flash-attention warnings in logs
-**Solution**: Normal - warnings are suppressed, flash-attention still works
 
 ## 📁 Key Files
 
