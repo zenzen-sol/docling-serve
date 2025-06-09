@@ -1,7 +1,9 @@
 import argparse
 import logging
 import os
+import re
 import tempfile
+import time
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -29,6 +31,32 @@ from docling_serve.storage import download_from_gcs
 logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
 
+# Suppress transformers noise early - before any model loading
+import os
+
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import warnings
+
+warnings.filterwarnings("ignore", message=".*temperature.*")
+warnings.filterwarnings("ignore", message=".*generation flags.*")
+warnings.filterwarnings("ignore", message=".*truncation.*")
+warnings.filterwarnings("ignore", message=".*max_length.*")
+warnings.filterwarnings("ignore", message=".*Flash Attention.*")
+
+# Set transformers logging level
+try:
+    import transformers
+
+    transformers.logging.set_verbosity_error()
+except ImportError:
+    pass
+
+# Global tracking for progress
+start_time = None
+total_pages_global = 0
+
 
 def send_progress_update(
     callback_url: Optional[str],
@@ -40,15 +68,33 @@ def send_progress_update(
     total_tokens_estimate: Optional[int] = None,
     processed_pages: Optional[int] = None,
     total_pages: Optional[int] = None,
+    elapsed_minutes: Optional[float] = None,
+    estimated_remaining_minutes: Optional[float] = None,
 ):
     """Sends a progress update to the provided callback URL."""
     if not callback_url:
         _log.warning("No progress callback URL provided. Skipping update.")
         return
 
-    _log.info(f"Sending progress update: status='{status}', message='{message}'")
+    # Calculate percentage if we have the data
+    percentage = None
+    if processed_pages is not None and total_pages is not None and total_pages > 0:
+        percentage = round((processed_pages / total_pages) * 100, 1)
+
+    progress_msg = message
+    if processed_pages is not None and total_pages is not None:
+        progress_msg = f"Page {processed_pages}/{total_pages}"
+        if percentage is not None:
+            progress_msg += f" ({percentage}%)"
+        if elapsed_minutes is not None:
+            progress_msg += f" - {elapsed_minutes:.1f}m elapsed"
+        if estimated_remaining_minutes is not None:
+            progress_msg += f", ~{estimated_remaining_minutes:.1f}m remaining"
+
+    _log.info(f"📈 Progress: {progress_msg}")
+
     try:
-        payload = {"status": status, "message": message, "source_id": source_id}
+        payload = {"status": status, "message": progress_msg, "source_id": source_id}
         if error:
             payload["error"] = error
         if total_tokens_estimate is not None:
@@ -57,6 +103,12 @@ def send_progress_update(
             payload["processed_pages"] = processed_pages
         if total_pages is not None:
             payload["total_pages"] = total_pages
+        if percentage is not None:
+            payload["percentage"] = percentage
+        if elapsed_minutes is not None:
+            payload["elapsed_minutes"] = elapsed_minutes
+        if estimated_remaining_minutes is not None:
+            payload["estimated_remaining_minutes"] = estimated_remaining_minutes
 
         headers = {"Content-Type": "application/json"}
         if token:
@@ -66,9 +118,11 @@ def send_progress_update(
             callback_url, json=payload, headers=headers, timeout=15
         )
         response.raise_for_status()
-        _log.info("Progress update sent successfully.")
+        _log.info("✅ Progress update sent successfully to maboroshi-api")
     except requests.RequestException as e:
-        _log.error(f"Failed to send progress update: {e}", exc_info=True)
+        _log.error(
+            f"❌ Failed to send progress update to maboroshi-api: {e}", exc_info=True
+        )
 
 
 def log_gpu_diagnostics():
@@ -107,11 +161,14 @@ def run_conversion(
     source_url, source_id, callback_url, progress_callback_url, progress_callback_token
 ):
     """The main conversion process."""
+    global start_time, total_pages_global
+
     total_pages = 0
     total_tokens_estimate = None
     vlm_logger = None
     page_progress_handler = None
     file_stream = None
+    start_time = time.time()
 
     try:
         # Enable GCS model caching (if configured)
@@ -128,10 +185,11 @@ def run_conversion(
             try:
                 pdf_reader = PdfReader(temp_pdf.name)
                 total_pages = len(pdf_reader.pages)
+                total_pages_global = total_pages
                 ESTIMATED_TOKENS_PER_PAGE = 2000
                 total_tokens_estimate = total_pages * ESTIMATED_TOKENS_PER_PAGE
                 _log.info(
-                    f"Estimated token count for {total_pages} pages: {total_tokens_estimate}"
+                    f"📄 Document has {total_pages} pages (estimated {total_tokens_estimate} tokens)"
                 )
             except Exception:
                 _log.warning(
@@ -144,15 +202,20 @@ def run_conversion(
 
         # 2. Set up logging if a callback is provided
         if progress_callback_url:
-            page_progress_handler = PageProgressLogHandler(
+            # Create enhanced progress handler
+            page_progress_handler = EnhancedPageProgressLogHandler(
                 url=progress_callback_url,
                 source_id=source_id,
                 total_pages=total_pages,
                 token=progress_callback_token,
             )
-            vlm_logger = logging.getLogger("docling.models.hf_vlm_model")
+            # Use the correct logger name from the actual log messages
+            vlm_logger = logging.getLogger(
+                "docling.models.vlm_models_inline.hf_transformers_model"
+            )
             vlm_logger.addHandler(page_progress_handler)
             vlm_logger.setLevel(logging.DEBUG)
+            _log.info(f"🔗 Progress tracking attached to logger: {vlm_logger.name}")
 
         # 3. Send a starting progress update
         send_progress_update(
@@ -160,9 +223,11 @@ def run_conversion(
             token=progress_callback_token,
             source_id=source_id,
             status="PROCESSING",
-            message="Starting document conversion process.",
+            message=f"Starting conversion of {total_pages} pages",
             total_tokens_estimate=total_tokens_estimate,
             total_pages=total_pages,
+            processed_pages=0,
+            elapsed_minutes=0.0,
         )
 
         # 4. Set up the conversion options
@@ -178,6 +243,12 @@ def run_conversion(
         )
 
         vlm_pipeline = VlmPipeline(pipeline_options)
+
+        # Log actual pipeline configuration
+        _log.info(
+            f"🔧 Pipeline accelerator options: {pipeline_options.accelerator_options}"
+        )
+
         converter = DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(
@@ -195,40 +266,63 @@ def run_conversion(
         file_name = Path(source_url).name.split("?")[0]
         sources = [DocumentStream(name=file_name, stream=file_stream)]
 
-        _log.info(f"Starting conversion for {file_name}...")
+        _log.info(f"🎯 Starting conversion for {file_name}...")
 
         # 6. Run the conversion with Automatic Mixed Precision (AMP)
         # This enables flash-attention to work with proper dtypes
         _log.info(
             "🚀 Using Automatic Mixed Precision (AMP) for flash-attention compatibility"
         )
+
+        # Add flash-attention verification
+        try:
+            import flash_attn
+
+            _log.info(f"✅ Flash-attention version: {flash_attn.__version__}")
+            _log.info(f"🔧 AMP context: device_type=cuda, dtype=bfloat16")
+            _log.info("🔍 Flash-attention should activate during model forward pass...")
+
+        except ImportError:
+            _log.warning("❌ Flash-attention not available!")
+
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            _log.info("🚀 Starting conversion with AMP enabled...")
             results = converter.convert_all(sources)
             result: ConversionResult = next(results)
 
         if result.document:
+            elapsed_time = time.time() - start_time
+
+            # Calculate performance metrics
+            if total_pages > 0:
+                pages_per_minute = total_pages / (elapsed_time / 60)
+                _log.info(f"📊 Performance: {pages_per_minute:.1f} pages/minute")
+
             _log.info(
-                f"Conversion successful for {file_name}. Preparing to send result."
+                f"✅ Conversion successful for {file_name} in {elapsed_time / 60:.1f} minutes. Preparing to send result."
             )
             doc_json_str = result.document.model_dump_json()
             with BytesIO(doc_json_str.encode("utf-8")) as f:
                 files = {"docling_file": ("docling.json", f, "application/json")}
                 response = requests.post(callback_url, files=files)
             response.raise_for_status()
-            _log.info(f"Callback successful with status code: {response.status_code}")
+            _log.info(
+                f"✅ Callback successful with status code: {response.status_code}"
+            )
         elif result.error:
             raise result.error
 
     except Exception as e:
+        elapsed_time = time.time() - start_time if start_time else 0
         _log.error(
-            f"An unexpected error occurred during job execution: {e}", exc_info=True
+            f"❌ Job failed after {elapsed_time / 60:.1f} minutes: {e}", exc_info=True
         )
         send_progress_update(
             callback_url=progress_callback_url,
             token=progress_callback_token,
             source_id=source_id,
             status="FAILED",
-            message="An unexpected error occurred during job execution.",
+            message=f"Job failed after {elapsed_time / 60:.1f} minutes",
             error=str(e),
         )
         raise
@@ -237,6 +331,51 @@ def run_conversion(
             vlm_logger.removeHandler(page_progress_handler)
         if file_stream:
             file_stream.close()
+
+
+class EnhancedPageProgressLogHandler(logging.Handler):
+    """Enhanced progress handler with timing and percentage calculations."""
+
+    def __init__(
+        self, url: str, source_id: str, total_pages: int, token: Optional[str] = None
+    ):
+        super().__init__()
+        self.url = url
+        self.source_id = source_id
+        self.total_pages = total_pages
+        self.token = token
+        self.processed_pages = 0
+        # This regex matches the specific log message from the VLM model.
+        self.progress_regex = re.compile(r"Generated \d+ tokens")
+
+    def emit(self, record: logging.LogRecord):
+        """Enhanced progress tracking with timing estimates."""
+        if self.progress_regex.search(record.getMessage()):
+            self.processed_pages += 1
+
+            # Calculate timing
+            elapsed_time = time.time() - start_time if start_time else 0
+            elapsed_minutes = elapsed_time / 60
+
+            # Estimate remaining time
+            estimated_remaining_minutes = None
+            if self.processed_pages > 0:
+                avg_time_per_page = elapsed_time / self.processed_pages
+                remaining_pages = self.total_pages - self.processed_pages
+                estimated_remaining_minutes = (remaining_pages * avg_time_per_page) / 60
+
+            # Send enhanced progress update
+            send_progress_update(
+                callback_url=self.url,
+                token=self.token,
+                source_id=self.source_id,
+                status="PROCESSING",
+                message=f"Processed page {self.processed_pages} of {self.total_pages}",
+                processed_pages=self.processed_pages,
+                total_pages=self.total_pages,
+                elapsed_minutes=elapsed_minutes,
+                estimated_remaining_minutes=estimated_remaining_minutes,
+            )
 
 
 def main():
