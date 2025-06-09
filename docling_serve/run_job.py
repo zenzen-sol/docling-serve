@@ -233,10 +233,35 @@ def run_conversion(
         # 4. Set up the conversion options
         _log.info("🔧 Configuring VLM pipeline with flash-attention...")
 
+        # Create custom VLM options optimized for flash-attention
+        # The key change: disable 8-bit quantization which conflicts with flash-attention
+        # Use model_copy to safely create a modified version of the default options
+
+        custom_vlm_options = smoldocling_vlm_conversion_options.model_copy(
+            update={
+                "load_in_8bit": False
+            }  # 🔧 Disable 8-bit quantization for flash-attention compatibility
+        )
+
+        # Debug: Compare original vs custom options
+        _log.info(
+            f"🔍 Original options load_in_8bit: {smoldocling_vlm_conversion_options.load_in_8bit}"
+        )
+        _log.info(f"🔍 Custom options load_in_8bit: {custom_vlm_options.load_in_8bit}")
+        _log.info(f"🔍 Custom options dump: {custom_vlm_options.model_dump()}")
+
         pipeline_options = VlmPipelineOptions(
             accelerator_options=AcceleratorOptions(cuda_use_flash_attention2=True)
         )
-        pipeline_options.vlm_options = smoldocling_vlm_conversion_options
+        pipeline_options.vlm_options = custom_vlm_options
+
+        # Verify the options are actually set
+        _log.info(
+            f"🔍 Pipeline VLM options load_in_8bit: {pipeline_options.vlm_options.load_in_8bit}"
+        )
+        _log.info(
+            "🔧 Custom VLM options: 8-bit quantization disabled for flash-attention compatibility"
+        )
 
         _log.info(
             f"🚀 Flash-attention enabled: {pipeline_options.accelerator_options.cuda_use_flash_attention2}"
@@ -244,9 +269,21 @@ def run_conversion(
 
         vlm_pipeline = VlmPipeline(pipeline_options)
 
-        # Log actual pipeline configuration
+        # Log actual pipeline configuration and check for caching issues
         _log.info(
             f"🔧 Pipeline accelerator options: {pipeline_options.accelerator_options}"
+        )
+
+        # Calculate options hash to see if caching might be an issue
+        import hashlib
+        import json
+
+        options_dict = pipeline_options.model_dump()
+        options_str = json.dumps(options_dict, sort_keys=True)
+        options_hash = hashlib.md5(options_str.encode()).hexdigest()[:16]
+        _log.info(f"🔍 Pipeline options hash: {options_hash}")
+        _log.info(
+            "💡 If hash matches previous runs, caching might be preventing custom options from taking effect"
         )
 
         converter = DocumentConverter(
@@ -280,7 +317,12 @@ def run_conversion(
 
             _log.info(f"✅ Flash-attention version: {flash_attn.__version__}")
             _log.info(f"🔧 AMP context: device_type=cuda, dtype=bfloat16")
-            _log.info("🔍 Flash-attention should activate during model forward pass...")
+            _log.info(
+                "🔍 Flash-attention should activate with proper dtype (no more warnings expected)"
+            )
+            _log.info(
+                "🎯 Model will load without 8-bit quantization for flash-attention compatibility"
+            )
 
         except ImportError:
             _log.warning("❌ Flash-attention not available!")
