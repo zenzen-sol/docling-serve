@@ -85,6 +85,21 @@ def log_gpu_diagnostics():
             _log.info(f"   - Device {i}: {device_name}")
     else:
         _log.error("❌ CUDA is NOT available. Processing will be VERY slow.")
+
+    # Check flash-attention installation
+    try:
+        import flash_attn
+
+        _log.info(f"✅ Flash-attention installed: {flash_attn.__version__}")
+    except ImportError:
+        _log.error("❌ Flash-attention NOT installed")
+
+    # Check relevant environment variables
+    _log.info("🔧 Environment variables:")
+    flash_env = os.environ.get("FLASH_ATTENTION_SKIP_CUDA_BUILD", "not set")
+    _log.info(f"   - FLASH_ATTENTION_SKIP_CUDA_BUILD: {flash_env}")
+    transformers_verbosity = os.environ.get("TRANSFORMERS_VERBOSITY", "not set")
+    _log.info(f"   - TRANSFORMERS_VERBOSITY: {transformers_verbosity}")
     _log.info("=" * 50)
 
 
@@ -151,10 +166,17 @@ def run_conversion(
         )
 
         # 4. Set up the conversion options
+        _log.info("🔧 Configuring VLM pipeline with flash-attention...")
+
         pipeline_options = VlmPipelineOptions(
             accelerator_options=AcceleratorOptions(cuda_use_flash_attention2=True)
         )
         pipeline_options.vlm_options = smoldocling_vlm_conversion_options
+
+        _log.info(
+            f"🚀 Flash-attention enabled: {pipeline_options.accelerator_options.cuda_use_flash_attention2}"
+        )
+
         vlm_pipeline = VlmPipeline(pipeline_options)
         converter = DocumentConverter(
             format_options={
@@ -164,15 +186,25 @@ def run_conversion(
             }
         )
 
+        # Log batch size configuration
+        batch_size = getattr(pipeline_options.vlm_options, "batch_size", "unknown")
+        _log.info(f"📊 VLM batch size: {batch_size}")
+        _log.info("✅ VLM pipeline configured successfully")
+
         # 5. Prepare the source document.
         file_name = Path(source_url).name.split("?")[0]
         sources = [DocumentStream(name=file_name, stream=file_stream)]
 
         _log.info(f"Starting conversion for {file_name}...")
 
-        # 6. Run the conversion.
-        results = converter.convert_all(sources)
-        result: ConversionResult = next(results)
+        # 6. Run the conversion with Automatic Mixed Precision (AMP)
+        # This enables flash-attention to work with proper dtypes
+        _log.info(
+            "🚀 Using Automatic Mixed Precision (AMP) for flash-attention compatibility"
+        )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            results = converter.convert_all(sources)
+            result: ConversionResult = next(results)
 
         if result.document:
             _log.info(
