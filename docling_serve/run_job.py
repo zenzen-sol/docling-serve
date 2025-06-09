@@ -257,6 +257,7 @@ def main():
     args = parser.parse_args()
 
     # If a progress callback URL is provided, set up the HTTP logger
+    progress_callback_url_with_id = None
     if args.progress_callback_url:
         # Note: We do not append the source_id here, as the handler will
         # be used for generic log messages. The receiving API should handle

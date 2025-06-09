@@ -59,9 +59,16 @@ FROM dependencies AS final
 # Copy project files
 COPY --chown=1001:0 ./docling_serve ./docling_serve
 
-# Create temp directory for model caching
+# Create temp directory for model caching and gcloud config as root
+USER root
 RUN mkdir -p /tmp/docling-models && \
     chown -R 1001:0 /tmp/docling-models && \
-    chmod -R g=u /tmp/docling-models
+    chmod -R g=u /tmp/docling-models && \
+    mkdir -p /opt/app-root/src/.config/gcloud/configurations && \
+    chown -R 1001:0 /opt/app-root/src/.config && \
+    chmod -R g=u /opt/app-root/src/.config
+
+# Switch back to user 1001
+USER 1001
 
 ENTRYPOINT ["python", "-m", "docling_serve.run_job"] 

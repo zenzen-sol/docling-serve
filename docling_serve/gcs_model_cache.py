@@ -43,17 +43,43 @@ class GCSModelCache:
 
     def _download_models_from_gcs(self) -> None:
         """Download models from GCS bucket to local cache."""
+        print("PRINT DEBUG: Starting _download_models_from_gcs function")
+        logger.error("ERROR DEBUG: Starting _download_models_from_gcs function")
         try:
-            # Create local directory
+            # Create local directory structure
             self.local_cache_path.mkdir(parents=True, exist_ok=True)
+            self.models_path.mkdir(parents=True, exist_ok=True)
 
-            # Download from GCS
-            gcs_source = f"gs://{self.bucket_name}/models/"
-            local_target = str(self.models_path)
+            # Download from GCS - the bucket has models/models/* structure
+            gcs_source = f"gs://{self.bucket_name}/models/models/*"
+            local_target = (
+                str(self.models_path) + "/"
+            )  # Trailing slash required for gsutil with multiple files
 
             cmd = ["gsutil", "-m", "cp", "-r", gcs_source, local_target]
 
-            logger.info(f"Running: {' '.join(cmd)}")
+            # Pre-flight checks
+            logger.error(f"DEBUG: Target directory exists: {self.models_path.exists()}")
+            logger.error(
+                f"DEBUG: Target directory permissions: {oct(self.models_path.stat().st_mode) if self.models_path.exists() else 'N/A'}"
+            )
+
+            # Test gsutil authentication
+            auth_test = subprocess.run(
+                ["gsutil", "ls", f"gs://{self.bucket_name}/"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if auth_test.returncode == 0:
+                logger.error("DEBUG: ✅ gsutil authentication test passed")
+            else:
+                logger.error(
+                    f"DEBUG: ❌ gsutil authentication test failed: {auth_test.stderr}"
+                )
+
+            logger.error(f"DEBUG: Running: {' '.join(cmd)}")
+            print(f"PRINT DEBUG: About to run gsutil command: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 check=True,
@@ -67,9 +93,16 @@ class GCSModelCache:
                 logger.debug(f"gsutil stdout: {result.stdout}")
 
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to download models from GCS: {e}")
+            logger.error(f"DEBUG: Failed to download models from GCS: {e}")
+            if e.stdout:
+                logger.error(f"DEBUG: gsutil stdout: {e.stdout}")
             if e.stderr:
-                logger.error(f"gsutil stderr: {e.stderr}")
+                logger.error(f"DEBUG: gsutil stderr: {e.stderr}")
+
+            # Try to diagnose the issue
+            logger.error(f"DEBUG: Command that failed: {' '.join(cmd)}")
+            logger.error(f"DEBUG: Return code: {e.returncode}")
+
             raise RuntimeError(f"GCS model download failed: {e}")
         except subprocess.TimeoutExpired:
             raise RuntimeError("GCS model download timed out after 5 minutes")
