@@ -32,12 +32,6 @@ class VllmBatchVlmModel:
         try:
             self.logger.info("Initializing vLLM engine for batch VLM processing...")
 
-            # Force legacy vLLM engine for idefics3 compatibility
-            os.environ["VLLM_USE_V1"] = "0"
-            self.logger.info(
-                "🔧 Forced vLLM to use legacy v0 engine for idefics3 compatibility"
-            )
-
             # Use SmolDocling - specifically designed for document processing with proven vLLM compatibility
             model_id = "ds4sd/SmolDocling-256M-preview"
 

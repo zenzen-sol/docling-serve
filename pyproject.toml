@@ -32,7 +32,8 @@ requires-python = ">=3.10"
 dependencies = [
     "docling[vlm]~=2.28",
     "mlx-vlm~=0.1.12; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "vllm>=0.6.0",
+    "vllm==0.8.5",
+    "transformers~=4.51.0",
     "fastapi[standard]~=0.115",
     "httpx~=0.28",
     "kfp[kubernetes]>=2.10.0",
