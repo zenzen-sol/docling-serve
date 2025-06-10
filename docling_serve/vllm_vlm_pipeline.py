@@ -179,49 +179,34 @@ Return only the content without explanations."""
         yield from pages
 
 
-class VllmBatchVlmPipeline(PaginatedPipeline):
-    """VLM Pipeline with vLLM batching backend - surgical replacement only."""
+class VllmBatchVlmPipeline(VlmPipeline):
+    """
+    VLM Pipeline with vLLM batching backend.
+
+    Inherits from the standard VlmPipeline to reuse its doctags parsing logic,
+    and surgically replaces the single-page model call with a batched vLLM implementation.
+    """
 
     def __init__(self, pipeline_options: VlmPipelineOptions):
+        # Initialize the standard VlmPipeline, which sets up the build pipe
+        # including the crucial doctags parser.
         super().__init__(pipeline_options)
-        self.pipeline_options = pipeline_options
-        self.keep_backend = True
+        _log.info(
+            "🔧 Initialized standard VlmPipeline. Now replacing model with vLLM..."
+        )
 
-        # Handle artifacts path like VlmPipeline does
-        artifacts_path: Optional[Path] = None
-        if pipeline_options.artifacts_path is not None:
-            artifacts_path = Path(pipeline_options.artifacts_path).expanduser()
-        elif settings.artifacts_path is not None:
-            artifacts_path = Path(settings.artifacts_path).expanduser()
-
-        if artifacts_path is not None and not artifacts_path.is_dir():
-            raise RuntimeError(
-                f"The value of {artifacts_path} is not valid. "
-                "When defined, it must point to a folder containing all models required by the pipeline."
+        # The VlmPipeline's build_pipe contains a model and a parser.
+        # We replace the model (assumed to be the first element) with our vLLM implementation.
+        if self.build_pipe:
+            original_model_name = type(self.build_pipe[0]).__name__
+            self.build_pipe[0] = VllmBatchVlmModel()
+            _log.info(
+                f"✅ Surgically replaced '{original_model_name}' with 'VllmBatchVlmModel'."
             )
-
-        # SURGICAL REPLACEMENT: Use vLLM backend instead of HuggingFace
-        _log.info("🔧 Using vLLM backend instead of HuggingFace Transformers")
-
-        self.build_pipe = [
-            VllmBatchVlmModel(),
-        ]
-
-        self.enrichment_pipe = []
-
-        # Copy settings from VlmPipeline
-        self.keep_images = pipeline_options.generate_page_images
-
-        # Fallback pipeline for non-VLM operations
-        self.fallback_pipeline = VlmPipeline(pipeline_options)
-
-    def initialize_page(self, conv_res: ConversionResult, page: Page) -> Page:
-        """Initialize page - delegate to VlmPipeline."""
-        return self.fallback_pipeline.initialize_page(conv_res, page)
-
-    def _assemble_document(self, conv_res: ConversionResult) -> ConversionResult:
-        """Assemble document - delegate to VlmPipeline to preserve all functionality."""
-        return self.fallback_pipeline._assemble_document(conv_res)
+        else:
+            # This case should not be reached in normal operation
+            _log.warning("Build pipe is empty, cannot replace model.")
+            self.build_pipe = [VllmBatchVlmModel()]
 
     @classmethod
     def get_default_options(cls) -> VlmPipelineOptions:

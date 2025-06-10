@@ -332,10 +332,24 @@ def run_conversion(
             _log.info(
                 f"✅ Conversion successful for {file_name} in {elapsed_time / 60:.1f} minutes. Preparing to send result."
             )
-            doc_json_str = result.document.model_dump_json()
-            with BytesIO(doc_json_str.encode("utf-8")) as f:
-                files = {"docling_file": ("docling.json", f, "application/json")}
-                response = requests.post(callback_url, files=files)
+
+            # 6. Log the full conversion result for debugging
+            try:
+                result_json = result.model_dump_json(indent=2)
+                _log.info(f"📬 Final ConversionResult JSON payload:\n{result_json}")
+            except Exception as e:
+                _log.error(f"❌ Failed to serialize ConversionResult to JSON: {e}")
+
+            # 7. Send the final result to the main callback URL
+            headers = {"Content-Type": "application/json"}
+            if progress_callback_token:
+                headers["Authorization"] = f"Bearer {progress_callback_token}"
+            with BytesIO(result_json.encode("utf-8")) as f:
+                response = requests.post(
+                    callback_url,
+                    files={"docling_file": ("docling.json", f, "application/json")},
+                    headers=headers,
+                )
             response.raise_for_status()
             _log.info(
                 f"✅ Callback successful with status code: {response.status_code}"
