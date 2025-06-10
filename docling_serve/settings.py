@@ -48,6 +48,7 @@ class DoclingServeSettings(BaseSettings):
     options_cache_size: int = 2
     enable_remote_services: bool = False
     allow_external_plugins: bool = False
+    enable_vllm_batching: bool = False
 
     max_document_timeout: float = 3_600 * 24 * 7  # 7 days
     max_num_pages: int = sys.maxsize

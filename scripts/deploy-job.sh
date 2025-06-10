@@ -36,7 +36,7 @@ gcloud beta run jobs deploy "${CLOUD_RUN_JOB_NAME}" \
     --memory 16Gi \
     --task-timeout 3600 \
     --max-retries 1 \
-    --set-env-vars DOCLING_SERVE_MAX_SYNC_WAIT=300,USE_GCS_MODELS=true \
+    --set-env-vars DOCLING_SERVE_MAX_SYNC_WAIT=300,USE_GCS_MODELS=true,ENABLE_VLLM_BATCHING=true,VLLM_BATCH_SIZE=4,VLLM_GPU_MEMORY_UTILIZATION=0.8 \
     --gpu 1 \
     --gpu-type nvidia-l4
 

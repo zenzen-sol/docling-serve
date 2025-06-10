@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional, Union
 
+import torch
 from fastapi import HTTPException
 
 from docling.backend.docling_parse_backend import DoclingParseDocumentBackend
@@ -36,6 +37,7 @@ from docling_core.types.doc import ImageRefMode
 from docling_serve.datamodel.convert import ConvertDocumentsOptions, ocr_factory
 from docling_serve.helper_functions import _to_list_of_strings
 from docling_serve.settings import docling_serve_settings
+from docling_serve.vllm_vlm_pipeline import VllmBatchVlmPipeline
 
 _log = logging.getLogger(__name__)
 
@@ -189,6 +191,33 @@ def _parse_vlm_pdf_opts(
     return pipeline_options
 
 
+def _should_use_vllm_batching(request: ConvertDocumentsOptions) -> bool:
+    """Determine if vLLM batching should be used for this request.
+
+    Args:
+        request: The conversion request options
+
+    Returns:
+        True if vLLM batching should be used, False otherwise
+    """
+    # Check if vLLM batching is enabled via environment variable
+    import os
+
+    enable_vllm = os.getenv("ENABLE_VLLM_BATCHING", "false").lower() == "true"
+
+    if not enable_vllm:
+        _log.debug("vLLM batching disabled via configuration")
+        return False
+
+    # Check if we have GPU available
+    if not torch.cuda.is_available():
+        _log.debug("CUDA not available, falling back to standard VLM pipeline")
+        return False
+
+    _log.info("✅ Using vLLM batching for VLM pipeline")
+    return True
+
+
 # Computes the PDF pipeline options and returns the PdfFormatOption and its hash
 def get_pdf_pipeline_opts(
     request: ConvertDocumentsOptions,
@@ -230,9 +259,18 @@ def get_pdf_pipeline_opts(
 
     elif request.pipeline == PdfPipeline.VLM:
         pipeline_options = _parse_vlm_pdf_opts(request, artifacts_path)
-        pdf_format_option = PdfFormatOption(
-            pipeline_cls=VlmPipeline, pipeline_options=pipeline_options
-        )
+
+        # Choose between vLLM batching and standard VLM pipeline
+        if _should_use_vllm_batching(request):
+            _log.info("🚀 Using vLLM batching pipeline for enhanced performance")
+            pdf_format_option = PdfFormatOption(
+                pipeline_cls=VllmBatchVlmPipeline, pipeline_options=pipeline_options
+            )
+        else:
+            _log.info("📝 Using standard VLM pipeline")
+            pdf_format_option = PdfFormatOption(
+                pipeline_cls=VlmPipeline, pipeline_options=pipeline_options
+            )
     else:
         raise NotImplementedError(
             f"The pipeline {request.pipeline} is not implemented."
