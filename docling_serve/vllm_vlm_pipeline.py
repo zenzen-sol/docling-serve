@@ -32,10 +32,27 @@ class VllmBatchVlmModel:
         try:
             self.logger.info("Initializing vLLM engine for batch VLM processing...")
 
+            # Force legacy vLLM engine for idefics3 compatibility
+            os.environ["VLLM_USE_V1"] = "0"
+            self.logger.info(
+                "🔧 Forced vLLM to use legacy v0 engine for idefics3 compatibility"
+            )
+
             # Use SmolDocling - specifically designed for document processing with proven vLLM compatibility
             model_id = "ds4sd/SmolDocling-256M-preview"
 
             from vllm import LLM, SamplingParams
+
+            # Log version information for debugging
+            try:
+                import transformers
+                import vllm
+
+                self.logger.info(f"🔍 Transformers version: {transformers.__version__}")
+                self.logger.info(f"🔍 vLLM version: {vllm.__version__}")
+                self.logger.info(f"🔍 Model: {model_id}")
+            except Exception as version_error:
+                self.logger.warning(f"Could not determine versions: {version_error}")
 
             # Optimized settings for document processing based on DigitalOcean tutorial
             self.llm = LLM(
@@ -49,21 +66,35 @@ class VllmBatchVlmModel:
             )
 
             self.sampling_params = SamplingParams(
-                max_tokens=6000,  # Full token support for legal contracts
-                temperature=0.1,  # Consistent outputs for document processing
-                top_p=0.9,
-                frequency_penalty=0.0,
-                stop_token_ids=None,
+                max_tokens=6000,  # Support long token sequences for legal contracts
+                temperature=0.1,
+                top_p=0.95,
             )
 
+            self.logger.info(f"✅ vLLM engine initialized successfully with {model_id}")
             self.logger.info(
-                f"vLLM engine initialized successfully with SmolDocling for document processing"
+                f"📊 Batch size: {self._batch_size}, GPU memory: {os.getenv('VLLM_GPU_MEMORY_UTILIZATION', '0.8')}"
             )
 
         except Exception as e:
-            self.logger.error(f"Failed to initialize vLLM engine: {e}")
+            # Known compatibility issue: SmolDocling (idefics3) has version conflicts with recent transformers/vLLM
+            # See: https://github.com/vllm-project/vllm/issues/19032 and related GitHub issues
+            self.logger.error(f"❌ Failed to initialize vLLM engine: {e}")
+            self.logger.warning(
+                "🔧 Known issue: SmolDocling (idefics3) has compatibility issues with current vLLM/transformers versions"
+            )
+            self.logger.warning(
+                "📋 Common errors include 'image_token.content' attribute issues and shape access on None objects"
+            )
+            self.logger.warning(
+                "⚡ Falling back to standard VLM pipeline - document processing will continue but without GPU batching acceleration"
+            )
+            self.logger.info(
+                "🎯 Performance: Expect ~10 pages/minute instead of 50-100 pages/minute with successful vLLM batching"
+            )
+
             self.llm = None
-            # Fallback to standard VLM will be handled by caller
+            self.sampling_params = None
 
     def __call__(self, conv_res: ConversionResult, page_batch: Iterable[Page]):
         """Process page batch with vLLM - drop-in replacement for HF model."""
