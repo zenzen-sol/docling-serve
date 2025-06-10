@@ -56,6 +56,7 @@ class VllmBatchVlmModel:
                 ),
                 dtype="bfloat16",
                 trust_remote_code=True,
+                enforce_eager=True,  # Force eager mode to prevent ONNX lookup
                 # SmolDocling is lightweight and stable - no need for compatibility workarounds
             )
 
@@ -115,7 +116,8 @@ class VllmBatchVlmModel:
         _log.info(f"🔄 vLLM batching {len(batch_images)} pages...")
 
         # Prepare batch prompts
-        prompt_template = """You are an OCR assistant. Analyze the provided image and:
+        prompt_template = """<image>
+You are an OCR assistant. Analyze the provided image and:
 1. Extract all text content exactly as it appears
 2. Preserve formatting, structure, and layout
 3. Include any mathematical formulas or special characters

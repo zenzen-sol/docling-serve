@@ -225,10 +225,12 @@ def _should_use_vllm_batching(request: ConvertDocumentsOptions) -> bool:
 
     # Check if we have GPU available
     cuda_available = torch.cuda.is_available()
+    mps_available = torch.backends.mps.is_available()
     _log.info(f"🔍 CUDA availability check: {cuda_available}")
+    _log.info(f"🔍 MPS availability check: {mps_available}")
 
-    if not cuda_available:
-        _log.info("❌ CUDA not available, falling back to standard VLM pipeline")
+    if not cuda_available and not mps_available:
+        _log.info("❌ CUDA or MPS not available, falling back to standard VLM pipeline")
         return False
 
     # Try to import vLLM to ensure it's available

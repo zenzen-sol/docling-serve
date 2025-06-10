@@ -179,6 +179,7 @@ def run_conversion(
 
             setup_gcs_models()
             _log.info("GCS model caching initialized")
+
         # 1. Download the file to get page count and estimate tokens
         with tempfile.NamedTemporaryFile() as temp_pdf:
             download_from_gcs(source_url, temp_pdf.name)
@@ -456,6 +457,9 @@ def main():
     # For now, we will use the defaults for the VLM pipeline.
 
     args = parser.parse_args()
+
+    if not args.source_url:
+        parser.error("Either --source-url is required.")
 
     # If a progress callback URL is provided, set up the HTTP logger
     progress_callback_url_with_id = None
