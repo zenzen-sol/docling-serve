@@ -22,6 +22,8 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
+from docling_serve.datamodel.convert import ConvertDocumentsOptions
+from docling_serve.docling_conversion import _should_use_vllm_batching
 from docling_serve.http_logging import (
     HttpJsonLogHandler,
     PageProgressLogHandler,
@@ -250,54 +252,40 @@ def run_conversion(
         _log.info(f"🔍 Custom options load_in_8bit: {custom_vlm_options.load_in_8bit}")
         _log.info(f"🔍 Custom options dump: {custom_vlm_options.model_dump()}")
 
-        pipeline_options = VlmPipelineOptions(
-            accelerator_options=AcceleratorOptions(cuda_use_flash_attention2=True)
-        )
-        pipeline_options.vlm_options = custom_vlm_options
+        # A. Create a dummy request object for the check function
+        dummy_request = ConvertDocumentsOptions()
 
-        # Verify the options are actually set
-        _log.info(
-            f"🔍 Pipeline VLM options load_in_8bit: {pipeline_options.vlm_options.load_in_8bit}"
-        )
-        _log.info(
-            "🔧 Custom VLM options: 8-bit quantization disabled for flash-attention compatibility"
-        )
+        # B. Decide which pipeline class to use
+        try:
+            from docling_serve.vllm_vlm_pipeline import VllmBatchVlmPipeline
 
-        _log.info(
-            f"🚀 Flash-attention enabled: {pipeline_options.accelerator_options.cuda_use_flash_attention2}"
-        )
+            if _should_use_vllm_batching(dummy_request):
+                _log.info("🚀 Using vLLM batching pipeline for enhanced performance")
+                pipeline_class = VllmBatchVlmPipeline
+            else:
+                _log.info("📝 Using standard VLM pipeline")
+                pipeline_class = VlmPipeline
+        except ImportError:
+            _log.error(
+                "Could not import VllmBatchVlmPipeline, defaulting to VlmPipeline"
+            )
+            pipeline_class = VlmPipeline
 
-        vlm_pipeline = VlmPipeline(pipeline_options)
+        format_options = {
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_cls=pipeline_class,
+                pipeline_options=VlmPipelineOptions(
+                    # Enable FlashAttention for a significant performance boost on the GPU.
+                    accelerator_options=AcceleratorOptions(
+                        cuda_use_flash_attention2=True
+                    ),
+                    vlm_options=custom_vlm_options,
+                ),
+            )
+        }
+        _log.info(f"✅ Pipeline class selected: {pipeline_class.__name__}")
 
-        # Log actual pipeline configuration and check for caching issues
-        _log.info(
-            f"🔧 Pipeline accelerator options: {pipeline_options.accelerator_options}"
-        )
-
-        # Calculate options hash to see if caching might be an issue
-        import hashlib
-        import json
-
-        options_dict = pipeline_options.model_dump()
-        options_str = json.dumps(options_dict, sort_keys=True)
-        options_hash = hashlib.md5(options_str.encode()).hexdigest()[:16]
-        _log.info(f"🔍 Pipeline options hash: {options_hash}")
-        _log.info(
-            "💡 If hash matches previous runs, caching might be preventing custom options from taking effect"
-        )
-
-        converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(
-                    pipeline_cls=VlmPipeline, pipeline_instance=vlm_pipeline
-                )
-            }
-        )
-
-        # Log batch size configuration
-        batch_size = getattr(pipeline_options.vlm_options, "batch_size", "unknown")
-        _log.info(f"📊 VLM batch size: {batch_size}")
-        _log.info("✅ VLM pipeline configured successfully")
+        converter = DocumentConverter(format_options=format_options)
 
         # 5. Prepare the source document.
         file_name = Path(source_url).name.split("?")[0]

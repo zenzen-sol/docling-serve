@@ -248,72 +248,35 @@ def _should_use_vllm_batching(request: ConvertDocumentsOptions) -> bool:
 def get_pdf_pipeline_opts(
     request: ConvertDocumentsOptions,
 ) -> PdfFormatOption:
-    artifacts_path: Optional[Path] = None
-    if docling_serve_settings.artifacts_path is not None:
-        if str(docling_serve_settings.artifacts_path.absolute()) == "":
-            _log.info(
-                "artifacts_path is an empty path, model weights will be downloaded "
-                "at runtime."
-            )
-            artifacts_path = None
-        elif docling_serve_settings.artifacts_path.is_dir():
-            _log.info(
-                "artifacts_path is set to a valid directory. "
-                "No model weights will be downloaded at runtime."
-            )
-            artifacts_path = docling_serve_settings.artifacts_path
-        else:
-            _log.warning(
-                "artifacts_path is set to an invalid directory. "
-                "The system will download the model weights at runtime."
-            )
-            artifacts_path = None
-    else:
-        _log.info(
-            "artifacts_path is unset. "
-            "The system will download the model weights at runtime."
-        )
+    artifacts_path = (
+        docling_serve_settings.artifacts_path
+        if docling_serve_settings.artifacts_path is not None
+        else None
+    )
 
-    pipeline_options: Union[PdfPipelineOptions, VlmPipelineOptions]
-    if request.pipeline == PdfPipeline.STANDARD:
+    if request.pipeline == PdfPipeline.VLM:
+        pipeline_options = _parse_vlm_pdf_opts(request, artifacts_path)
+
+        # Check if we should use the vLLM batching pipeline
+        if _should_use_vllm_batching(request):
+            _log.info("🚀 Using vLLM batching pipeline for enhanced performance")
+            pdf_format_option = PdfFormatOption(
+                pipeline_cls=VllmBatchVlmPipeline,
+                backend=PyPdfiumDocumentBackend,
+                pipeline_options=pipeline_options,
+            )
+        else:
+            pdf_format_option = PdfFormatOption(
+                pipeline_cls=VlmPipeline,
+                backend=PyPdfiumDocumentBackend,
+                pipeline_options=pipeline_options,
+            )
+    else:
         pipeline_options = _parse_standard_pdf_opts(request, artifacts_path)
         backend = _parse_backend(request)
         pdf_format_option = PdfFormatOption(
             pipeline_options=pipeline_options,
             backend=backend,
-        )
-
-    elif request.pipeline == PdfPipeline.VLM:
-        pipeline_options = _parse_vlm_pdf_opts(request, artifacts_path)
-
-        _log.info("🔍 VLM pipeline requested, checking vLLM batching eligibility...")
-
-        # Choose between vLLM batching and standard VLM pipeline
-        try:
-            should_use_vllm = _should_use_vllm_batching(request)
-            _log.info(f"🔍 vLLM batching eligibility check result: {should_use_vllm}")
-
-            if should_use_vllm and VllmBatchVlmPipeline is not None:
-                _log.info("🚀 Using vLLM batching pipeline for enhanced performance")
-                pdf_format_option = PdfFormatOption(
-                    pipeline_cls=VllmBatchVlmPipeline, pipeline_options=pipeline_options
-                )
-            else:
-                _log.info("📝 Using standard VLM pipeline")
-                pdf_format_option = PdfFormatOption(
-                    pipeline_cls=VlmPipeline, pipeline_options=pipeline_options
-                )
-        except Exception as e:
-            _log.error(
-                f"❌ Error in vLLM batching check, falling back to standard VLM: {e}"
-            )
-            _log.debug(f"vLLM check error details: {e}", exc_info=True)
-            pdf_format_option = PdfFormatOption(
-                pipeline_cls=VlmPipeline, pipeline_options=pipeline_options
-            )
-    else:
-        raise NotImplementedError(
-            f"The pipeline {request.pipeline} is not implemented."
         )
 
     return pdf_format_option

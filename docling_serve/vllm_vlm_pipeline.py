@@ -1,30 +1,114 @@
 """
 vLLM-based VLM Pipeline for batched inference with SmolDocling model.
 
-This module provides a custom VLM pipeline that uses vLLM for batched inference,
-significantly improving performance for multi-page documents by processing
-multiple pages simultaneously instead of sequentially.
+This module provides a VLM pipeline that uses vLLM for batched inference,
+following the docling pipeline architecture by extending PaginatedPipeline
+and using the build_pipe pattern.
 """
 
 import logging
-import time
+import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Optional
 
-import torch
-from PIL import Image
-from vllm import LLM, SamplingParams
-
-from docling.datamodel.base_models import DocumentStream
-from docling.datamodel.document import ConversionResult, DocumentConversionInput
+from docling.datamodel.base_models import Page
+from docling.datamodel.document import ConversionResult
 from docling.datamodel.pipeline_options import VlmPipelineOptions
-from docling.pipeline.base_pipeline import BasePipeline
+from docling.datamodel.pipeline_options_vlm_model import (
+    InferenceFramework,
+    InlineVlmOptions,
+)
+from docling.datamodel.settings import settings
+from docling.pipeline.base_pipeline import PaginatedPipeline
 from docling.pipeline.vlm_pipeline import VlmPipeline
+from docling.utils.profiling import ProfilingScope, TimeRecorder
 
 _log = logging.getLogger(__name__)
 
-# Standard prompt used by SmolDocling
-SMOLDOCLING_PROMPT = """You are an OCR assistant. Analyze the provided image and:
+
+class VllmBatchVlmModel:
+    """vLLM-based VLM model for batched inference."""
+
+    def __init__(
+        self,
+        enabled: bool = True,
+        artifacts_path: Optional[Path] = None,
+        accelerator_options=None,
+        vlm_options: Optional[InlineVlmOptions] = None,
+    ):
+        self.enabled = enabled
+        self.artifacts_path = artifacts_path
+        self.accelerator_options = accelerator_options
+        self.vlm_options = vlm_options
+
+        if enabled:
+            self._initialize_vllm()
+
+    def _initialize_vllm(self):
+        """Initialize vLLM model."""
+        try:
+            from vllm import LLM, SamplingParams
+
+            model_name = "HuggingFaceTB/SmolVLM-Instruct"
+            batch_size = int(os.getenv("VLLM_BATCH_SIZE", "4"))
+            gpu_memory_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.8"))
+
+            _log.info(f"🚀 Initializing vLLM with model: {model_name}")
+
+            self.llm = LLM(
+                model=model_name,
+                tensor_parallel_size=1,
+                gpu_memory_utilization=gpu_memory_util,
+                max_model_len=8192,
+                trust_remote_code=True,
+                dtype="bfloat16",
+                disable_log_stats=False,
+                enable_prefix_caching=True,
+            )
+
+            self.sampling_params = SamplingParams(
+                temperature=0.1,
+                top_p=0.9,
+                max_tokens=2048,
+                stop=[],
+            )
+
+            self.batch_size = batch_size
+            _log.info(f"✅ vLLM initialized successfully (batch_size={batch_size})")
+
+        except Exception as e:
+            _log.error(f"❌ Failed to initialize vLLM: {e}")
+            self.enabled = False
+            raise
+
+    def __call__(self, conv_res: ConversionResult, page_batch):
+        """Process a batch of pages with vLLM."""
+        if not self.enabled:
+            return page_batch
+
+        _log.info(f"🔄 Processing page batch with vLLM...")
+
+        # Convert pages to list for processing
+        pages = list(page_batch)
+
+        # Extract images from pages
+        images = []
+        for page in pages:
+            if hasattr(page, "image") and page.image:
+                images.append(page.image)
+            else:
+                images.append(None)
+
+        # Filter out None images for vLLM processing
+        valid_images = [img for img in images if img is not None]
+
+        if not valid_images:
+            _log.warning("No valid images found in page batch")
+            yield from pages
+            return
+
+        # Prepare prompts for vLLM
+        prompt = """You are an OCR assistant. Analyze the provided image and:
 1. Extract all text content exactly as it appears
 2. Preserve formatting, structure, and layout
 3. Include any mathematical formulas or special characters
@@ -32,211 +116,108 @@ SMOLDOCLING_PROMPT = """You are an OCR assistant. Analyze the provided image and
 
 Return only the content without explanations."""
 
+        prompts = []
+        for img in valid_images:
+            prompts.append({"prompt": prompt, "multi_modal_data": {"image": img}})
 
-class VllmBatchVlmPipeline(BasePipeline):
+        # Run vLLM batch inference
+        try:
+            outputs = self.llm.generate(prompts, self.sampling_params)
+
+            # Extract generated text
+            vlm_results = []
+            for output in outputs:
+                generated_text = output.outputs[0].text
+                vlm_results.append(generated_text)
+
+            _log.info(f"✅ vLLM processed {len(vlm_results)} images")
+
+            # Apply results back to pages
+            result_idx = 0
+            for i, page in enumerate(pages):
+                if images[i] is not None:
+                    # Create mock VLM response structure to match standard pipeline
+                    if not hasattr(page, "predictions"):
+                        page.predictions = type("obj", (object,), {})()
+                    if not hasattr(page.predictions, "vlm_response"):
+                        page.predictions.vlm_response = type("obj", (object,), {})()
+
+                    page.predictions.vlm_response.text = vlm_results[result_idx]
+                    result_idx += 1
+
+                yield page
+
+        except Exception as e:
+            _log.error(f"❌ vLLM processing failed: {e}")
+            # Fallback: yield pages without VLM processing
+            yield from pages
+
+
+class VllmBatchVlmPipeline(PaginatedPipeline):
     """vLLM-based VLM pipeline for batched inference with SmolDocling model."""
 
     def __init__(self, pipeline_options: VlmPipelineOptions):
-        """Initialize the vLLM VLM pipeline.
-
-        Args:
-            pipeline_options: Configuration options for the VLM pipeline
-        """
+        """Initialize the vLLM VLM pipeline."""
         super().__init__(pipeline_options)
         self.pipeline_options = pipeline_options
+        self.keep_backend = True
 
-        # Initialize vLLM model with SmolDocling
-        model_name = "HuggingFaceTB/SmolVLM-Instruct"
+        # Set up artifacts path
+        artifacts_path: Optional[Path] = None
+        if pipeline_options.artifacts_path is not None:
+            artifacts_path = Path(pipeline_options.artifacts_path).expanduser()
+        elif settings.artifacts_path is not None:
+            artifacts_path = Path(settings.artifacts_path).expanduser()
 
-        # Configure vLLM for optimal batching
-        _log.info(f"🚀 Initializing vLLM with model: {model_name}")
+        if artifacts_path is not None and not artifacts_path.is_dir():
+            raise RuntimeError(
+                f"The value of {artifacts_path} is not valid. "
+                "When defined, it must point to a folder containing all models required by the pipeline."
+            )
 
-        # Get batch size from environment or use default
-        import os
+        # Configure build pipe with vLLM model
+        _log.info("🚀 Initializing pipeline for VllmBatchVlmPipeline")
 
-        batch_size = int(os.getenv("VLLM_BATCH_SIZE", "4"))
-        gpu_memory_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.8"))
+        self.build_pipe = [
+            VllmBatchVlmModel(
+                enabled=True,
+                artifacts_path=artifacts_path,
+                accelerator_options=pipeline_options.accelerator_options,
+                vlm_options=None,  # We handle VLM options internally
+            ),
+        ]
 
-        self.llm = LLM(
-            model=model_name,
-            tensor_parallel_size=1,  # Adjust based on GPU count
-            gpu_memory_utilization=gpu_memory_util,
-            max_model_len=8192,  # Adjust based on needs
-            trust_remote_code=True,
-            dtype="bfloat16",  # Use bfloat16 for better performance
-            disable_log_stats=False,  # Enable for monitoring
-            enable_prefix_caching=True,  # Cache common prefixes for efficiency
-        )
+        # Set up enrichment pipe (empty for now)
+        self.enrichment_pipe = []
 
-        # Configure sampling parameters for consistent output
-        self.sampling_params = SamplingParams(
-            temperature=0.1,  # Low temperature for consistent OCR
-            top_p=0.9,
-            max_tokens=2048,  # Adjust based on expected output length
-            stop=[],  # No specific stop tokens for OCR
-        )
+        # Image settings
+        self.keep_images = self.pipeline_options.generate_page_images
 
-        # Store batch size
-        self.batch_size = batch_size
-
-        # Fallback to standard VLM pipeline for compatibility
+        # Fallback pipeline for compatibility
         self.fallback_pipeline = VlmPipeline(pipeline_options)
 
-        _log.info(
-            f"✅ vLLM VLM pipeline initialized successfully (batch_size={batch_size})"
-        )
+    def initialize_page(self, conv_res: ConversionResult, page: Page) -> Page:
+        """Initialize page resources."""
+        with TimeRecorder(conv_res, "page_init"):
+            page._backend = conv_res.input._backend.load_page(page.page_no)  # type: ignore
+            if page._backend is not None and page._backend.is_valid():
+                page.size = page._backend.get_size()
+        return page
 
-    def __call__(
-        self,
-        conv_input: DocumentConversionInput,
-        **kwargs,
-    ) -> ConversionResult:
-        """Process a document using vLLM batched inference.
+    def _assemble_document(self, conv_res: ConversionResult) -> ConversionResult:
+        """Assemble the final document using VLM pipeline logic."""
+        with TimeRecorder(conv_res, "doc_assemble", scope=ProfilingScope.DOCUMENT):
+            # Use the standard VLM pipeline's assembly logic
+            return self.fallback_pipeline._assemble_document(conv_res)
 
-        Args:
-            conv_input: Document conversion input containing pages
-            **kwargs: Additional keyword arguments
+    @classmethod
+    def get_default_options(cls) -> VlmPipelineOptions:
+        """Get default pipeline options."""
+        return VlmPipelineOptions()
 
-        Returns:
-            ConversionResult: Processed document result
-        """
-        _log.info(
-            f"🎯 Starting vLLM batched processing for document: {conv_input.file}"
-        )
+    @classmethod
+    def is_backend_supported(cls, backend):
+        """Check if backend is supported."""
+        from docling.backend.pdf_backend import PdfDocumentBackend
 
-        try:
-            return self._process_with_vllm_batching(conv_input, **kwargs)
-        except Exception as e:
-            _log.warning(
-                f"⚠️ vLLM processing failed, falling back to standard pipeline: {e}"
-            )
-            _log.debug(f"vLLM error details: {e}", exc_info=True)
-            return self.fallback_pipeline(conv_input, **kwargs)
-
-    def _process_with_vllm_batching(
-        self,
-        conv_input: DocumentConversionInput,
-        **kwargs,
-    ) -> ConversionResult:
-        """Process document pages using vLLM batched inference."""
-        start_time = time.time()
-
-        _log.info("🚀 Starting REAL vLLM batched VLM processing...")
-
-        # First, run the standard pipeline to get layout detection, OCR, etc.
-        # but disable VLM processing to avoid duplicate work
-        temp_options = VlmPipelineOptions(
-            artifacts_path=self.pipeline_options.artifacts_path,
-            document_timeout=self.pipeline_options.document_timeout,
-            accelerator_options=self.pipeline_options.accelerator_options,
-        )
-
-        # Create a standard pipeline without VLM for base processing
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
-        from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
-
-        standard_options = PdfPipelineOptions(
-            artifacts_path=self.pipeline_options.artifacts_path,
-            document_timeout=self.pipeline_options.document_timeout,
-            do_ocr=True,
-            do_table_structure=True,
-            do_picture_description=False,  # We'll handle this with vLLM
-        )
-
-        standard_pipeline = StandardPdfPipeline(standard_options)
-
-        # Get base document structure without VLM processing
-        base_result = standard_pipeline(conv_input, **kwargs)
-
-        if not base_result.document or not base_result.document.pages:
-            _log.warning("No pages found in document, skipping vLLM processing")
-            return base_result
-
-        # Extract page images for vLLM processing
-        page_images = []
-        page_indices = []
-
-        for i, page in enumerate(base_result.document.pages):
-            if hasattr(page, "image") and page.image:
-                page_images.append(page.image)
-                page_indices.append(i)
-
-        if not page_images:
-            _log.warning("No page images found for vLLM processing")
-            return base_result
-
-        _log.info(
-            f"📄 Processing {len(page_images)} pages with vLLM batching (batch_size={self.batch_size})"
-        )
-
-        # Process pages in batches with vLLM
-        all_vlm_outputs = []
-
-        for batch_start in range(0, len(page_images), self.batch_size):
-            batch_end = min(batch_start + self.batch_size, len(page_images))
-            batch_images = page_images[batch_start:batch_end]
-            batch_indices = page_indices[batch_start:batch_end]
-
-            _log.info(
-                f"🔄 Processing batch {batch_start // self.batch_size + 1}: pages {batch_indices}"
-            )
-
-            # Prepare prompts for batch
-            prompts = []
-            for img in batch_images:
-                # Convert PIL Image to format expected by vLLM
-                prompts.append(
-                    {"prompt": SMOLDOCLING_PROMPT, "multi_modal_data": {"image": img}}
-                )
-
-            # Run vLLM batch inference
-            batch_start_time = time.time()
-            outputs = self.llm.generate(prompts, self.sampling_params)
-            batch_time = time.time() - batch_start_time
-
-            _log.info(
-                f"✅ Batch completed in {batch_time:.2f}s ({len(batch_images) / batch_time:.2f} pages/sec)"
-            )
-
-            # Extract text outputs
-            for output in outputs:
-                generated_text = output.outputs[0].text
-                all_vlm_outputs.append(generated_text)
-
-        # Apply VLM outputs back to document pages
-        for i, (page_idx, vlm_output) in enumerate(zip(page_indices, all_vlm_outputs)):
-            # Here we would integrate the VLM output into the document structure
-            # For now, we'll add it as additional text content
-            page = base_result.document.pages[page_idx]
-
-            # Add VLM-extracted content to page
-            if hasattr(page, "text") and page.text:
-                page.text += f"\n\n<!-- vLLM Enhanced Content -->\n{vlm_output}"
-            else:
-                page.text = vlm_output
-
-        elapsed_time = time.time() - start_time
-        pages_per_second = len(page_images) / elapsed_time if elapsed_time > 0 else 0
-
-        _log.info(
-            f"🎯 vLLM batch processing completed: {len(page_images)} pages in "
-            f"{elapsed_time:.2f}s ({pages_per_second:.2f} pages/sec total)"
-        )
-
-        return base_result
-
-    def supports_batching(self) -> bool:
-        """Check if this pipeline supports batching.
-
-        Returns:
-            True, as this pipeline is designed for batching
-        """
-        return True
-
-    def get_batch_size(self) -> int:
-        """Get the optimal batch size for this pipeline.
-
-        Returns:
-            Configured batch size
-        """
-        return self.batch_size
+        return isinstance(backend, PdfDocumentBackend)
