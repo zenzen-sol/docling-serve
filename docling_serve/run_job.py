@@ -330,17 +330,11 @@ def run_conversion(
                 _log.info(f"📊 Performance: {pages_per_minute:.1f} pages/minute")
 
             _log.info(
-                f"✅ Conversion successful for {file_name} in {elapsed_time / 60:.1f} minutes. Preparing to send result."
+                f"✅ Conversion successful for {file_name} in {elapsed_time:.2f} seconds. Preparing to send result."
             )
 
-            # 6. Log the full conversion result for debugging
-            try:
-                result_json = result.model_dump_json(indent=2)
-                _log.info(f"📬 Final ConversionResult JSON payload:\n{result_json}")
-            except Exception as e:
-                _log.error(f"❌ Failed to serialize ConversionResult to JSON: {e}")
-
-            # 7. Send the final result to the main callback URL
+            # 6. Send the final result to the main callback URL
+            result_json = result.model_dump_json(indent=2)
             headers = {"Content-Type": "application/json"}
             if progress_callback_token:
                 headers["Authorization"] = f"Bearer {progress_callback_token}"
