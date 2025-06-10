@@ -129,12 +129,39 @@ Same as above - the multi-stage build handles this efficiently.
 ### Model Changes (Slow: ~45+ minutes)
 If you need different models, update `MODELS_LIST` in `Dockerfile` and rebuild.
 
+## ⚡ VLLM Batching Optimization
+
+To significantly improve performance, the system now includes a `VllmBatchVlmPipeline` which leverages the `vLLM` library for batched GPU inference. This provides a substantial speed-up over the standard, single-page processing model.
+
+### How It Works
+
+The `VllmBatchVlmPipeline` inherits from the standard `VlmPipeline` to reuse all its robust document parsing logic. It surgically replaces the Hugging Face model inference step with a highly optimized, batched call to the `vLLM` engine.
+
+Key implementation details can be found in `docling_serve/vllm_vlm_pipeline.py`.
+
+### Configuration
+
+The vLLM pipeline is controlled by the following environment variables:
+
+- **`ENABLE_VLLM_BATCHING`**: Set to `"true"` to activate the pipeline. If `false` or unset, the system gracefully falls back to the standard `VlmPipeline`.
+- **`VLLM_GPU_MEMORY_UTILIZATION`**: A float between `0.0` and `1.0` that controls the fraction of GPU memory `vLLM` is allowed to use. Defaults to `0.8`.
+- **`VLLM_BATCH_SIZE`**: The number of pages to process in a single batch. Defaults to `4`.
+
+### Critical Dependencies
+
+To ensure stability, the following libraries are **pinned** to specific versions in `pyproject.toml`. Do not change these versions without extensive testing, as they are required for compatibility with the `ds4sd/SmolDocling-256M-preview` model.
+
+- `vllm == 0.8.5`
+- `transformers ~= 4.51.0`
+
+These versions are from a known-good period (April/May 2024) where `vLLM` and the `idefics3` architecture (which `SmolDocling` uses) were compatible.
+
 ## 🎯 Performance Expectations
 
 - **Cold Start**: 60-90 seconds (downloading models from GCS)
-- **Processing**: ~30-60 seconds per page with flash-attention
-- **Memory Usage**: ~8-12GB for typical documents
-- **GPU Utilization**: High during VLM processing phases
+- **Processing (vLLM)**: **~8 pages/minute**. This is a significant improvement over the non-batched VLM pipeline.
+- **Memory Usage**: ~15-16GB. The vLLM engine is memory-intensive.
+- **GPU Utilization**: High (~60-85%) during batch processing.
 
 ## 🔍 Monitoring
 
@@ -150,7 +177,15 @@ gcloud run jobs executions list --job=docling-serve-job --region=us-central1
 
 ### Stream Logs
 ```bash
-gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=docling-serve-job" --limit=50 --format="table(timestamp,textPayload)"
+gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=docling-serve-job" --limit=100 --format="table(timestamp,textPayload)"
+```
+
+### GPU Metrics
+
+The service now logs GPU utilization and memory usage after each successful batch. Look for these messages in the logs to confirm the GPU is being used effectively:
+
+```
+INFO:docling_serve.vllm_vlm_pipeline:📊 GPU Metrics (cuda:0): Used: 15073.94 MiB, Total: 22699.88 MiB, Utilization: 66.41%
 ```
 
 ---
