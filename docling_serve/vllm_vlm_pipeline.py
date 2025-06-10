@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 from typing import Iterable, Optional
 
+import torch
+
 from docling.datamodel.base_models import Page
 from docling.datamodel.document import ConversionResult
 from docling.datamodel.pipeline_options import VlmPipelineOptions
@@ -153,6 +155,22 @@ Return only the content without explanations."""
                 )
 
             _log.info(f"✅ vLLM batch complete: {len(outputs)} pages processed")
+
+            # Log GPU metrics after successful batch processing
+            if torch.cuda.is_available():
+                try:
+                    for i in range(torch.cuda.device_count()):
+                        free_mem, total_mem = torch.cuda.mem_get_info(i)
+                        used_mem = total_mem - free_mem
+                        utilization = used_mem / total_mem * 100
+                        _log.info(
+                            f"📊 GPU Metrics (cuda:{i}): "
+                            f"Used: {used_mem / 1024**2:.2f} MiB, "
+                            f"Total: {total_mem / 1024**2:.2f} MiB, "
+                            f"Utilization: {utilization:.2f}%"
+                        )
+                except Exception as gpu_log_e:
+                    _log.warning(f"Could not log GPU metrics: {gpu_log_e}")
 
         except Exception as e:
             _log.error(f"❌ vLLM batch failed: {e}")
