@@ -37,9 +37,18 @@ from docling_core.types.doc import ImageRefMode
 from docling_serve.datamodel.convert import ConvertDocumentsOptions, ocr_factory
 from docling_serve.helper_functions import _to_list_of_strings
 from docling_serve.settings import docling_serve_settings
-from docling_serve.vllm_vlm_pipeline import VllmBatchVlmPipeline
 
 _log = logging.getLogger(__name__)
+
+# Test import to verify vLLM pipeline loads correctly
+try:
+    from docling_serve.vllm_vlm_pipeline import VllmBatchVlmPipeline
+
+    _log.info("✅ Successfully imported VllmBatchVlmPipeline")
+except Exception as e:
+    _log.error(f"❌ Failed to import VllmBatchVlmPipeline: {e}")
+    _log.debug(f"Import error details: {e}", exc_info=True)
+    VllmBatchVlmPipeline = None
 
 
 # Custom serializer for PdfFormatOption
@@ -203,18 +212,35 @@ def _should_use_vllm_batching(request: ConvertDocumentsOptions) -> bool:
     # Check if vLLM batching is enabled via environment variable
     import os
 
-    enable_vllm = os.getenv("ENABLE_VLLM_BATCHING", "false").lower() == "true"
+    enable_vllm_env = os.getenv("ENABLE_VLLM_BATCHING", "false")
+    enable_vllm = enable_vllm_env.lower() == "true"
+
+    _log.info(
+        f"🔍 Environment variable ENABLE_VLLM_BATCHING: '{enable_vllm_env}' -> {enable_vllm}"
+    )
 
     if not enable_vllm:
-        _log.debug("vLLM batching disabled via configuration")
+        _log.info("❌ vLLM batching disabled via configuration")
         return False
 
     # Check if we have GPU available
-    if not torch.cuda.is_available():
-        _log.debug("CUDA not available, falling back to standard VLM pipeline")
+    cuda_available = torch.cuda.is_available()
+    _log.info(f"🔍 CUDA availability check: {cuda_available}")
+
+    if not cuda_available:
+        _log.info("❌ CUDA not available, falling back to standard VLM pipeline")
         return False
 
-    _log.info("✅ Using vLLM batching for VLM pipeline")
+    # Try to import vLLM to ensure it's available
+    try:
+        import vllm  # noqa: F401
+
+        _log.info("✅ vLLM import successful")
+    except ImportError as e:
+        _log.error(f"❌ vLLM import failed: {e}")
+        return False
+
+    _log.info("✅ All checks passed - Using vLLM batching for VLM pipeline")
     return True
 
 
@@ -260,14 +286,28 @@ def get_pdf_pipeline_opts(
     elif request.pipeline == PdfPipeline.VLM:
         pipeline_options = _parse_vlm_pdf_opts(request, artifacts_path)
 
+        _log.info("🔍 VLM pipeline requested, checking vLLM batching eligibility...")
+
         # Choose between vLLM batching and standard VLM pipeline
-        if _should_use_vllm_batching(request):
-            _log.info("🚀 Using vLLM batching pipeline for enhanced performance")
-            pdf_format_option = PdfFormatOption(
-                pipeline_cls=VllmBatchVlmPipeline, pipeline_options=pipeline_options
+        try:
+            should_use_vllm = _should_use_vllm_batching(request)
+            _log.info(f"🔍 vLLM batching eligibility check result: {should_use_vllm}")
+
+            if should_use_vllm and VllmBatchVlmPipeline is not None:
+                _log.info("🚀 Using vLLM batching pipeline for enhanced performance")
+                pdf_format_option = PdfFormatOption(
+                    pipeline_cls=VllmBatchVlmPipeline, pipeline_options=pipeline_options
+                )
+            else:
+                _log.info("📝 Using standard VLM pipeline")
+                pdf_format_option = PdfFormatOption(
+                    pipeline_cls=VlmPipeline, pipeline_options=pipeline_options
+                )
+        except Exception as e:
+            _log.error(
+                f"❌ Error in vLLM batching check, falling back to standard VLM: {e}"
             )
-        else:
-            _log.info("📝 Using standard VLM pipeline")
+            _log.debug(f"vLLM check error details: {e}", exc_info=True)
             pdf_format_option = PdfFormatOption(
                 pipeline_cls=VlmPipeline, pipeline_options=pipeline_options
             )

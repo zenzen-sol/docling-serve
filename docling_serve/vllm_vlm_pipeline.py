@@ -118,31 +118,112 @@ class VllmBatchVlmPipeline(BasePipeline):
         conv_input: DocumentConversionInput,
         **kwargs,
     ) -> ConversionResult:
-        """Process document pages using vLLM batched inference.
-
-        For the first implementation, we'll use a simplified approach that leverages
-        the existing Docling pipeline structure while adding vLLM batching for the VLM step.
-        """
+        """Process document pages using vLLM batched inference."""
         start_time = time.time()
 
-        _log.info("🚀 Starting vLLM batched VLM processing...")
+        _log.info("🚀 Starting REAL vLLM batched VLM processing...")
 
-        # For now, run the standard pipeline but log that we're using vLLM
-        # In a full implementation, this would intercept the VLM model calls
-        # and replace them with batched vLLM inference
-        result = self.fallback_pipeline(conv_input, **kwargs)
+        # First, run the standard pipeline to get layout detection, OCR, etc.
+        # but disable VLM processing to avoid duplicate work
+        temp_options = VlmPipelineOptions(
+            artifacts_path=self.pipeline_options.artifacts_path,
+            document_timeout=self.pipeline_options.document_timeout,
+            accelerator_options=self.pipeline_options.accelerator_options,
+        )
+
+        # Create a standard pipeline without VLM for base processing
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
+
+        standard_options = PdfPipelineOptions(
+            artifacts_path=self.pipeline_options.artifacts_path,
+            document_timeout=self.pipeline_options.document_timeout,
+            do_ocr=True,
+            do_table_structure=True,
+            do_picture_description=False,  # We'll handle this with vLLM
+        )
+
+        standard_pipeline = StandardPdfPipeline(standard_options)
+
+        # Get base document structure without VLM processing
+        base_result = standard_pipeline(conv_input, **kwargs)
+
+        if not base_result.document or not base_result.document.pages:
+            _log.warning("No pages found in document, skipping vLLM processing")
+            return base_result
+
+        # Extract page images for vLLM processing
+        page_images = []
+        page_indices = []
+
+        for i, page in enumerate(base_result.document.pages):
+            if hasattr(page, "image") and page.image:
+                page_images.append(page.image)
+                page_indices.append(i)
+
+        if not page_images:
+            _log.warning("No page images found for vLLM processing")
+            return base_result
+
+        _log.info(
+            f"📄 Processing {len(page_images)} pages with vLLM batching (batch_size={self.batch_size})"
+        )
+
+        # Process pages in batches with vLLM
+        all_vlm_outputs = []
+
+        for batch_start in range(0, len(page_images), self.batch_size):
+            batch_end = min(batch_start + self.batch_size, len(page_images))
+            batch_images = page_images[batch_start:batch_end]
+            batch_indices = page_indices[batch_start:batch_end]
+
+            _log.info(
+                f"🔄 Processing batch {batch_start // self.batch_size + 1}: pages {batch_indices}"
+            )
+
+            # Prepare prompts for batch
+            prompts = []
+            for img in batch_images:
+                # Convert PIL Image to format expected by vLLM
+                prompts.append(
+                    {"prompt": SMOLDOCLING_PROMPT, "multi_modal_data": {"image": img}}
+                )
+
+            # Run vLLM batch inference
+            batch_start_time = time.time()
+            outputs = self.llm.generate(prompts, self.sampling_params)
+            batch_time = time.time() - batch_start_time
+
+            _log.info(
+                f"✅ Batch completed in {batch_time:.2f}s ({len(batch_images) / batch_time:.2f} pages/sec)"
+            )
+
+            # Extract text outputs
+            for output in outputs:
+                generated_text = output.outputs[0].text
+                all_vlm_outputs.append(generated_text)
+
+        # Apply VLM outputs back to document pages
+        for i, (page_idx, vlm_output) in enumerate(zip(page_indices, all_vlm_outputs)):
+            # Here we would integrate the VLM output into the document structure
+            # For now, we'll add it as additional text content
+            page = base_result.document.pages[page_idx]
+
+            # Add VLM-extracted content to page
+            if hasattr(page, "text") and page.text:
+                page.text += f"\n\n<!-- vLLM Enhanced Content -->\n{vlm_output}"
+            else:
+                page.text = vlm_output
 
         elapsed_time = time.time() - start_time
-        if result.document and result.document.pages:
-            pages_per_second = (
-                len(result.document.pages) / elapsed_time if elapsed_time > 0 else 0
-            )
-            _log.info(
-                f"✅ vLLM batch processing completed: {len(result.document.pages)} pages in "
-                f"{elapsed_time:.2f}s ({pages_per_second:.2f} pages/sec)"
-            )
+        pages_per_second = len(page_images) / elapsed_time if elapsed_time > 0 else 0
 
-        return result
+        _log.info(
+            f"🎯 vLLM batch processing completed: {len(page_images)} pages in "
+            f"{elapsed_time:.2f}s ({pages_per_second:.2f} pages/sec total)"
+        )
+
+        return base_result
 
     def supports_batching(self) -> bool:
         """Check if this pipeline supports batching.
