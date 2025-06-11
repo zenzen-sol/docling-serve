@@ -11,8 +11,8 @@ from typing import Iterable
 
 import torch
 
-from docling.datamodel.base_models import Page
-from docling.datamodel.document import ConversionResult, Predictions, VlmResponse
+from docling.datamodel.base_models import Page, PagePredictions, VlmPrediction
+from docling.datamodel.document import ConversionResult
 from docling.datamodel.pipeline_options import VlmPipelineOptions
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
@@ -148,10 +148,10 @@ Return only the content without explanations."""
                 generated_text = output.outputs[0].text
 
                 # Use the correct Pydantic models for predictions and response
-                if not hasattr(page, "predictions"):
-                    page.predictions = Predictions()
+                if not hasattr(page, "predictions") or page.predictions is None:
+                    page.predictions = PagePredictions()
 
-                page.predictions.vlm_response = VlmResponse(text=generated_text)
+                page.predictions.vlm_response = VlmPrediction(text=generated_text)
 
                 _log.info(f"Page {page.page_no}: Generated {len(generated_text)} chars")
 

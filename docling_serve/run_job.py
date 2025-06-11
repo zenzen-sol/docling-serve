@@ -295,7 +295,7 @@ def run_conversion(
             format_options={InputFormat.PDF: format_options[InputFormat.PDF]}
         )
         result: ConversionResult = converter.convert(
-            DocumentStream(file_stream, source_url)
+            DocumentStream(stream=file_stream, name=source_url)
         )
 
         # --- DIAGNOSTIC LOGGING ---
