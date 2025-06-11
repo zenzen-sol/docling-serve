@@ -44,7 +44,7 @@ COPY --chown=1001:0 pyproject.toml uv.lock ./
 # Install dependencies in two stages (flash-attn requires special handling)
 RUN uv venv /opt/app-root/venv && \
     . /opt/app-root/venv/bin/activate && \
-    uv pip install .[cu124,tesserocr,rapidocr] && \
+    UV_HTTP_TIMEOUT=300 uv pip install .[cu128,tesserocr,rapidocr] && \
     FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE uv pip install flash-attn --no-build-isolation
 
 ENV PATH="/opt/app-root/venv/bin:$PATH"

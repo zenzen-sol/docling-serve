@@ -13,7 +13,7 @@ from typing import Iterable, Optional
 import torch
 
 from docling.datamodel.base_models import Page
-from docling.datamodel.document import ConversionResult
+from docling.datamodel.document import ConversionResult, Predictions, VlmResponse
 from docling.datamodel.pipeline_options import VlmPipelineOptions
 from docling.datamodel.settings import settings
 from docling.pipeline.base_pipeline import PaginatedPipeline
@@ -142,17 +142,13 @@ Return only the content without explanations."""
                 page = batch_pages[i]
                 generated_text = output.outputs[0].text
 
-                # Create VLM response structure that matches docling expectations
+                # Use the correct Pydantic models for predictions and response
                 if not hasattr(page, "predictions"):
-                    page.predictions = type("Predictions", (), {})()
+                    page.predictions = Predictions()
 
-                page.predictions.vlm_response = type(
-                    "VlmResponse", (), {"text": generated_text}
-                )()
+                page.predictions.vlm_response = VlmResponse(text=generated_text)
 
-                _log.debug(
-                    f"Page {page.page_no}: Generated {len(generated_text)} chars"
-                )
+                _log.info(f"Page {page.page_no}: Generated {len(generated_text)} chars")
 
             _log.info(f"✅ vLLM batch complete: {len(outputs)} pages processed")
 

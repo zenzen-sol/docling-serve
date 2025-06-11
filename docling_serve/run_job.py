@@ -20,7 +20,7 @@ from docling.datamodel.pipeline_options import (
     smoldocling_vlm_conversion_options,
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.pipeline.vlm_pipeline import VlmPipeline
+from docling.pipeline.vlm_pipeline import VlmPipeline, VlmResultCollector
 
 from docling_serve.datamodel.convert import ConvertDocumentsOptions
 from docling_serve.docling_conversion import _should_use_vllm_batching
@@ -286,40 +286,35 @@ def run_conversion(
         }
         _log.info(f"✅ Pipeline class selected: {pipeline_class.__name__}")
 
-        converter = DocumentConverter(format_options=format_options)
+        # Use a result collector to intercept the output from the standard pipeline
+        result_collector = VlmResultCollector()
+        pipeline_options.build_pipe.append(result_collector)
 
-        # 5. Prepare the source document.
-        file_name = Path(source_url).name.split("?")[0]
-        sources = [DocumentStream(name=file_name, stream=file_stream)]
-
-        _log.info(f"🎯 Starting conversion for {file_name}...")
-
-        # 6. Run the conversion with Automatic Mixed Precision (AMP)
-        # This enables flash-attention to work with proper dtypes
-        _log.info(
-            "🚀 Using Automatic Mixed Precision (AMP) for flash-attention compatibility"
+        # 5. Run the conversion
+        converter = DocumentConverter(
+            format_options={InputFormat.PDF: format_options[InputFormat.PDF]}
+        )
+        result: ConversionResult = next(
+            converter.convert_documents([DocumentStream(file_stream, source_url)])
         )
 
-        # Add flash-attention verification
-        try:
-            import flash_attn
+        # --- DIAGNOSTIC LOGGING ---
+        if result_collector.results:
+            try:
+                # Log the first page's structure for analysis
+                first_page = result_collector.results[0]
+                page_dump = first_page.model_dump(
+                    exclude={"image", "document"}, round_trip=True
+                )
+                import json
 
-            _log.info(f"✅ Flash-attention version: {flash_attn.__version__}")
-            _log.info(f"🔧 AMP context: device_type=cuda, dtype=bfloat16")
-            _log.info(
-                "🔍 Flash-attention should activate with proper dtype (no more warnings expected)"
-            )
-            _log.info(
-                "🎯 Model will load without 8-bit quantization for flash-attention compatibility"
-            )
-
-        except ImportError:
-            _log.warning("❌ Flash-attention not available!")
-
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            _log.info("🚀 Starting conversion with AMP enabled...")
-            results = converter.convert_all(sources)
-            result: ConversionResult = next(results)
+                _log.info(
+                    "🕵️‍♂️ Fallback Pipeline - Page Structure Diagnostic:\n"
+                    f"{json.dumps(page_dump, indent=2)}"
+                )
+            except Exception as e:
+                _log.error(f"❌ Failed to dump page structure for diagnostics: {e}")
+        # --- END DIAGNOSTIC LOGGING ---
 
         if result.document:
             elapsed_time = time.time() - start_time
@@ -330,20 +325,19 @@ def run_conversion(
                 _log.info(f"📊 Performance: {pages_per_minute:.1f} pages/minute")
 
             _log.info(
-                f"✅ Conversion successful for {file_name} in {elapsed_time:.2f} seconds. Preparing to send result."
+                f"✅ Conversion successful for {source_url} in {elapsed_time:.2f} seconds. Preparing to send result."
             )
 
-            # 6. Send the final result to the main callback URL
-            result_json = result.model_dump_json(indent=2)
+            # 6. Send the final result to the main callback URL as a direct JSON payload.
+            _log.info(
+                "Fingerprint: Preparing to send direct JSON payload with definitive fix."
+            )
+            doc_json_str = result.document.model_dump_json()
             headers = {"Content-Type": "application/json"}
             if progress_callback_token:
                 headers["Authorization"] = f"Bearer {progress_callback_token}"
-            with BytesIO(result_json.encode("utf-8")) as f:
-                response = requests.post(
-                    callback_url,
-                    files={"docling_file": ("docling.json", f, "application/json")},
-                    headers=headers,
-                )
+
+            response = requests.post(callback_url, data=doc_json_str, headers=headers)
             response.raise_for_status()
             _log.info(
                 f"✅ Callback successful with status code: {response.status_code}"
