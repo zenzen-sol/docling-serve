@@ -13,7 +13,7 @@ import torch
 from pypdf import PdfReader
 
 from docling.datamodel.base_models import DocumentStream, InputFormat
-from docling.datamodel.document import ConversionResult
+from docling.datamodel.document import ConversionResult, ConversionStatus
 from docling.datamodel.pipeline_options import (
     AcceleratorOptions,
     VlmPipelineOptions,
@@ -315,9 +315,9 @@ def run_conversion(
         # Check conversion status and handle accordingly
         _log.info(f"Conversion status: {result.status}")
 
-        if result.document and str(result.status).lower() in [
-            "success",
-            "partial_success",
+        if result.document and result.status in [
+            ConversionStatus.SUCCESS,
+            ConversionStatus.PARTIAL_SUCCESS,
         ]:
             elapsed_time = time.time() - start_time
 
