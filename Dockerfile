@@ -12,8 +12,6 @@ RUN --mount=type=bind,source=os-packages.txt,target=/tmp/os-packages.txt \
     dnf config-manager --best --nodocs --setopt=install_weak_deps=False --save && \
     dnf config-manager --enable crb && \
     dnf -y update && \
-    # Add NVIDIA CUDA repository for CentOS Stream 9
-    dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo && \
     dnf -y install $(cat /tmp/os-packages.txt) && \
     # Install Google Cloud SDK for gsutil
     curl -sSL https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz | tar -xzC /opt && \
@@ -47,11 +45,8 @@ COPY --chown=1001:0 pyproject.toml uv.lock ./
 RUN uv venv /opt/app-root/venv && \
     . /opt/app-root/venv/bin/activate && \
     UV_HTTP_TIMEOUT=300 uv pip install .[cu128,tesserocr,rapidocr] && \
-    echo "Building flash-attention from source with CUDA support..." && \
-    export MAX_JOBS=4 && \
-    export NVCC_THREADS=4 && \
-    export FLASH_ATTENTION_SKIP_CUDA_BUILD=FALSE && \
-    UV_HTTP_TIMEOUT=1800 uv pip install flash-attn --no-build-isolation --verbose
+    echo "Installing prebuilt flash-attention wheel for CUDA 12.8..." && \
+    UV_HTTP_TIMEOUT=300 uv pip install https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.3.10/flash_attn-2.7.4+cu128torch2.7-cp312-cp312-linux_x86_64.whl --no-build-isolation
 
 ENV PATH="/opt/app-root/venv/bin:$PATH"
 
