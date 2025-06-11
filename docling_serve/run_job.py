@@ -33,12 +33,7 @@ from docling_serve.storage import download_from_gcs
 logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
 
-# Handle VlmResultCollector import gracefully in case of dependency issues
-try:
-    from docling.pipeline.vlm_pipeline import VlmResultCollector
-except ImportError:
-    _log.warning("VlmResultCollector not available, using fallback")
-    VlmResultCollector = None
+# VlmResultCollector is no longer needed with current pipeline architecture
 
 # Suppress transformers noise early - before any model loading
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
@@ -291,41 +286,39 @@ def run_conversion(
         }
         _log.info(f"✅ Pipeline class selected: {pipeline_class.__name__}")
 
-        # Use a result collector to intercept the output from the standard pipeline
+        # Note: VlmResultCollector is not compatible with current pipeline architecture
+        # Diagnostic logging will rely on the standard ConversionResult object
         result_collector = None
-        if VlmResultCollector is not None:
-            result_collector = VlmResultCollector()
-            pipeline_options.build_pipe.append(result_collector)
-        else:
-            _log.warning("VlmResultCollector not available, skipping result collection")
 
         # 5. Run the conversion
         converter = DocumentConverter(
             format_options={InputFormat.PDF: format_options[InputFormat.PDF]}
         )
-        result: ConversionResult = next(
-            converter.convert_documents([DocumentStream(file_stream, source_url)])
+        result: ConversionResult = converter.convert(
+            DocumentStream(file_stream, source_url)
         )
 
         # --- DIAGNOSTIC LOGGING ---
-        if result_collector and result_collector.results:
+        if result.document and result.document.pages:
             try:
-                # Log the first page's structure for analysis
-                first_page = result_collector.results[0]
-                page_dump = first_page.model_dump(
-                    exclude={"image", "document"}, round_trip=True
-                )
-                import json
-
+                # Log conversion result summary for analysis
+                page_count = len(result.document.pages)
+                text_items = len(result.document.texts)
                 _log.info(
-                    "🕵️‍♂️ Fallback Pipeline - Page Structure Diagnostic:\n"
-                    f"{json.dumps(page_dump, indent=2)}"
+                    f"🕵️‍♂️ Conversion Summary: {page_count} pages processed, "
+                    f"{text_items} text items extracted"
                 )
             except Exception as e:
-                _log.error(f"❌ Failed to dump page structure for diagnostics: {e}")
+                _log.error(f"❌ Failed to log conversion summary: {e}")
         # --- END DIAGNOSTIC LOGGING ---
 
-        if result.document:
+        # Check conversion status and handle accordingly
+        _log.info(f"Conversion status: {result.status}")
+
+        if result.document and str(result.status).lower() in [
+            "success",
+            "partial_success",
+        ]:
             elapsed_time = time.time() - start_time
 
             # Calculate performance metrics
@@ -351,8 +344,12 @@ def run_conversion(
             _log.info(
                 f"✅ Callback successful with status code: {response.status_code}"
             )
-        elif result.error:
-            raise result.error
+        else:
+            # Handle failure cases
+            error_msg = f"Conversion failed with status: {result.status}"
+            if result.errors:
+                error_msg += f", errors: {', '.join(str(e) for e in result.errors)}"
+            raise Exception(error_msg)
 
     except Exception as e:
         elapsed_time = time.time() - start_time if start_time else 0
