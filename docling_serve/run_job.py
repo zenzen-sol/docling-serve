@@ -20,7 +20,7 @@ from docling.datamodel.pipeline_options import (
     smoldocling_vlm_conversion_options,
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.pipeline.vlm_pipeline import VlmPipeline, VlmResultCollector
+from docling.pipeline.vlm_pipeline import VlmPipeline
 
 from docling_serve.datamodel.convert import ConvertDocumentsOptions
 from docling_serve.docling_conversion import _should_use_vllm_batching
@@ -33,9 +33,14 @@ from docling_serve.storage import download_from_gcs
 logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
 
-# Suppress transformers noise early - before any model loading
-import os
+# Handle VlmResultCollector import gracefully in case of dependency issues
+try:
+    from docling.pipeline.vlm_pipeline import VlmResultCollector
+except ImportError:
+    _log.warning("VlmResultCollector not available, using fallback")
+    VlmResultCollector = None
 
+# Suppress transformers noise early - before any model loading
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -287,8 +292,12 @@ def run_conversion(
         _log.info(f"✅ Pipeline class selected: {pipeline_class.__name__}")
 
         # Use a result collector to intercept the output from the standard pipeline
-        result_collector = VlmResultCollector()
-        pipeline_options.build_pipe.append(result_collector)
+        result_collector = None
+        if VlmResultCollector is not None:
+            result_collector = VlmResultCollector()
+            pipeline_options.build_pipe.append(result_collector)
+        else:
+            _log.warning("VlmResultCollector not available, skipping result collection")
 
         # 5. Run the conversion
         converter = DocumentConverter(
@@ -299,7 +308,7 @@ def run_conversion(
         )
 
         # --- DIAGNOSTIC LOGGING ---
-        if result_collector.results:
+        if result_collector and result_collector.results:
             try:
                 # Log the first page's structure for analysis
                 first_page = result_collector.results[0]

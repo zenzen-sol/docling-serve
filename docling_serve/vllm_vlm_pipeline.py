@@ -7,16 +7,13 @@ while enabling GPU batching for massive performance gains.
 
 import logging
 import os
-from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable
 
 import torch
 
 from docling.datamodel.base_models import Page
 from docling.datamodel.document import ConversionResult, Predictions, VlmResponse
 from docling.datamodel.pipeline_options import VlmPipelineOptions
-from docling.datamodel.settings import settings
-from docling.pipeline.base_pipeline import PaginatedPipeline
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
 _log = logging.getLogger(__name__)
@@ -37,7 +34,15 @@ class VllmBatchVlmModel:
             # Use SmolDocling - specifically designed for document processing with proven vLLM compatibility
             model_id = "ds4sd/SmolDocling-256M-preview"
 
-            from vllm import LLM, SamplingParams
+            # Import vLLM dynamically to handle missing dependencies
+            try:
+                from vllm import LLM, SamplingParams
+            except ImportError as import_error:
+                self.logger.error(f"❌ vLLM not available: {import_error}")
+                self.logger.warning("⚡ Falling back to standard VLM pipeline")
+                self.llm = None
+                self.sampling_params = None
+                return
 
             # Log version information for debugging
             try:

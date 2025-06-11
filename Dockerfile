@@ -45,7 +45,7 @@ COPY --chown=1001:0 pyproject.toml uv.lock ./
 RUN uv venv /opt/app-root/venv && \
     . /opt/app-root/venv/bin/activate && \
     UV_HTTP_TIMEOUT=300 uv pip install .[cu128,tesserocr,rapidocr] && \
-    FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE uv pip install flash-attn --no-build-isolation
+    uv pip install https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.3.10/flash_attn-2.7.4+cu128torch2.7-cp312-cp312-linux_x86_64.whl --no-build-isolation
 
 ENV PATH="/opt/app-root/venv/bin:$PATH"
 
