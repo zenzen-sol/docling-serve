@@ -212,13 +212,20 @@ def run_conversion(
                 total_pages=total_pages,
                 token=progress_callback_token,
             )
-            # Use the correct logger name from the actual log messages
+            # Attach to both the vLLM pipeline logger and the standard VLM logger for compatibility
+            vllm_logger = logging.getLogger("docling_serve.vllm_vlm_pipeline")
             vlm_logger = logging.getLogger(
                 "docling.models.vlm_models_inline.hf_transformers_model"
             )
+
+            vllm_logger.addHandler(page_progress_handler)
             vlm_logger.addHandler(page_progress_handler)
+            vllm_logger.setLevel(logging.INFO)  # Ensure we capture INFO level messages
             vlm_logger.setLevel(logging.DEBUG)
-            _log.info(f"🔗 Progress tracking attached to logger: {vlm_logger.name}")
+
+            _log.info(
+                f"🔗 Progress tracking attached to loggers: {vllm_logger.name}, {vlm_logger.name}"
+            )
 
         # 3. Send a starting progress update
         send_progress_update(
@@ -366,14 +373,23 @@ def run_conversion(
         )
         raise
     finally:
-        if vlm_logger and page_progress_handler:
-            vlm_logger.removeHandler(page_progress_handler)
+        # Clean up progress handlers from both loggers
+        if progress_callback_url and "page_progress_handler" in locals():
+            try:
+                vllm_logger = logging.getLogger("docling_serve.vllm_vlm_pipeline")
+                vlm_logger = logging.getLogger(
+                    "docling.models.vlm_models_inline.hf_transformers_model"
+                )
+                vllm_logger.removeHandler(page_progress_handler)
+                vlm_logger.removeHandler(page_progress_handler)
+            except Exception as cleanup_e:
+                _log.warning(f"Could not clean up progress handlers: {cleanup_e}")
         if file_stream:
             file_stream.close()
 
 
 class EnhancedPageProgressLogHandler(logging.Handler):
-    """Enhanced progress handler with timing and percentage calculations."""
+    """Enhanced progress handler with timing and percentage calculations for vLLM batching."""
 
     def __init__(
         self, url: str, source_id: str, total_pages: int, token: Optional[str] = None
@@ -384,13 +400,43 @@ class EnhancedPageProgressLogHandler(logging.Handler):
         self.total_pages = total_pages
         self.token = token
         self.processed_pages = 0
-        # This regex matches the specific log message from the VLM model.
-        self.progress_regex = re.compile(r"Generated \d+ tokens")
+
+        # Updated regex patterns to match vLLM batch processing messages
+        # Match both individual page completion and batch completion messages
+        self.progress_patterns = [
+            re.compile(
+                r"Page \d+: DocTags stored \(\d+ chars\)"
+            ),  # Individual page completion
+            re.compile(
+                r"✅ Batch #\d+:.*?(\d+\.\d+)s/page"
+            ),  # Batch completion with timing
+            re.compile(
+                r"Generated \d+ tokens"
+            ),  # Fallback for standard HF transformers
+        ]
 
     def emit(self, record: logging.LogRecord):
-        """Enhanced progress tracking with timing estimates."""
-        if self.progress_regex.search(record.getMessage()):
-            self.processed_pages += 1
+        """Enhanced progress tracking with timing estimates for vLLM batching."""
+        message = record.getMessage()
+
+        # Check if this is a progress-related message
+        pages_in_message = 0
+        for pattern in self.progress_patterns:
+            if pattern.search(message):
+                # Individual page completion - count as 1 page
+                if "Page" in message and "DocTags stored" in message:
+                    pages_in_message = 1
+                elif "✅ Batch #" in message and "s/page" in message:
+                    # Batch completion - extract page count from the preceding batch start message
+                    # We'll count this as 0 since individual pages were already counted
+                    pages_in_message = 0
+                else:
+                    # Standard HF transformers message - count as 1 page
+                    pages_in_message = 1
+                break
+
+        if pages_in_message > 0:
+            self.processed_pages += pages_in_message
 
             # Calculate timing
             elapsed_time = time.time() - start_time if start_time else 0
