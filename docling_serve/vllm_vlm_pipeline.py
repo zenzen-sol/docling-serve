@@ -14,6 +14,7 @@ import torch
 from docling.datamodel.base_models import Page, PagePredictions, VlmPrediction
 from docling.datamodel.document import ConversionResult
 from docling.datamodel.pipeline_options import VlmPipelineOptions
+from docling.datamodel.settings import settings
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
 _log = logging.getLogger(__name__)
@@ -26,7 +27,10 @@ class VllmBatchVlmModel:
         self.logger = logging.getLogger(__name__)
         self.llm = None
         self._batch_cache = []
-        self._batch_size = int(os.getenv("VLLM_BATCH_SIZE", "4"))
+        self._batch_counter = 0  # Track which batch is being processed
+        self._engine_restart_threshold = (
+            10  # Restart engine every N batches to prevent degradation
+        )
 
         try:
             self.logger.info("Initializing vLLM engine for batch VLM processing...")
@@ -55,27 +59,36 @@ class VllmBatchVlmModel:
             except Exception as version_error:
                 self.logger.warning(f"Could not determine versions: {version_error}")
 
-            # Optimized settings for document processing based on DigitalOcean tutorial
-            self.llm = LLM(
-                model=model_id,
-                gpu_memory_utilization=float(
-                    os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.8")
+            # Debug vLLM engine parameters
+            vllm_params = {
+                "model": model_id,
+                "gpu_memory_utilization": float(
+                    os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.75")
                 ),
-                dtype="bfloat16",
-                trust_remote_code=True,
-                enforce_eager=True,  # Force eager mode to prevent ONNX lookup
-                # SmolDocling is lightweight and stable - no need for compatibility workarounds
-            )
+                "dtype": "bfloat16",
+                "trust_remote_code": True,
+                "enforce_eager": True,  # Force eager mode to prevent ONNX lookup
+                # Simplified for debugging - remove potentially problematic params
+                "max_num_seqs": 4,  # Reduce parallel sequences
+                "max_model_len": 2048,  # Further reduce context length
+            }
+
+            _log.info(f"🔍 vLLM Debug: Initializing with params: {vllm_params}")
+            self.llm = LLM(**vllm_params)
 
             self.sampling_params = SamplingParams(
-                max_tokens=6000,  # Support long token sequences for legal contracts
-                temperature=0.1,
+                max_tokens=6000,  # Allow for pages up to ~5K tokens with buffer
+                temperature=0.0,  # Use exact temperature from SmolDocling docs
                 top_p=0.95,
+                stop=["<end_of_utterance>"],  # Explicit stop token
             )
 
             self.logger.info(f"✅ vLLM engine initialized successfully with {model_id}")
             self.logger.info(
-                f"📊 Batch size: {self._batch_size}, GPU memory: {os.getenv('VLLM_GPU_MEMORY_UTILIZATION', '0.8')}"
+                f"📊 GPU memory utilization: {os.getenv('VLLM_GPU_MEMORY_UTILIZATION', '0.8')}"
+            )
+            self.logger.info(
+                f"📊 Docling page batch size: {settings.perf.page_batch_size}"
             )
 
         except Exception as e:
@@ -120,27 +133,138 @@ class VllmBatchVlmModel:
             yield from pages
             return
 
-        _log.info(f"🔄 vLLM batching {len(batch_images)} pages...")
+        self._batch_counter += 1
 
-        # Prepare batch prompts
-        prompt_template = """<image>
-You are an OCR assistant. Analyze the provided image and:
-1. Extract all text content exactly as it appears
-2. Preserve formatting, structure, and layout
-3. Include any mathematical formulas or special characters
-4. Describe any tables, diagrams, or non-text elements
+        # Check if we need to restart the engine to prevent degradation
+        if self._batch_counter % self._engine_restart_threshold == 0:
+            _log.info(
+                f"🔄 Restarting vLLM engine after {self._batch_counter} batches to prevent degradation..."
+            )
+            try:
+                # Clear GPU memory before restart
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
 
-Return only the content without explanations."""
+                # Reinitialize the engine with same parameters
+                from vllm import LLM, SamplingParams
+
+                model_id = "ds4sd/SmolDocling-256M-preview"
+                vllm_params = {
+                    "model": model_id,
+                    "gpu_memory_utilization": float(
+                        os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.75")
+                    ),
+                    "dtype": "bfloat16",
+                    "trust_remote_code": True,
+                    "enforce_eager": True,
+                    "max_num_seqs": 4,
+                    "max_model_len": 2048,
+                }
+                self.llm = LLM(**vllm_params)
+                _log.info("✅ vLLM engine restarted successfully")
+            except Exception as restart_e:
+                _log.error(f"❌ Failed to restart vLLM engine: {restart_e}")
+                # Continue with existing engine
+
+        _log.info(
+            f"🔄 vLLM batching {len(batch_images)} pages... (Batch #{self._batch_counter})"
+        )
+
+        # Prepare batch prompts using correct SmolDocling chat template
+        # From HuggingFace docs: chat_template = f"<|im_start|>User:<image>{PROMPT_TEXT}<end_of_utterance>Assistant:"
+        chat_template = "<|im_start|>User:<image>Convert this page to docling.<end_of_utterance>Assistant:"
 
         prompts = []
-        for image in batch_images:
+        for i, image in enumerate(batch_images):
+            # Log image details for debugging
+            try:
+                import PIL.Image
+
+                if hasattr(image, "size"):
+                    _log.debug(f"Image {i}: {image.size} {image.mode}")
+                elif hasattr(image, "shape"):
+                    _log.debug(f"Image {i}: shape {image.shape}")
+                else:
+                    _log.debug(f"Image {i}: type {type(image)}")
+            except:
+                _log.debug(f"Image {i}: Could not inspect image details")
+
             prompts.append(
-                {"prompt": prompt_template, "multi_modal_data": {"image": image}}
+                {"prompt": chat_template, "multi_modal_data": {"image": image}}
             )
 
-        # Run vLLM batch inference
+        _log.info(
+            f"🔍 vLLM Debug: Processing {len(prompts)} prompts with chat template: {chat_template[:50]}..."
+        )
+        _log.info(
+            f"🔍 vLLM Debug: Sampling params - max_tokens:{self.sampling_params.max_tokens}, temp:{self.sampling_params.temperature}"
+        )
+
+        # Run vLLM batch inference with signal-based timeout
         try:
-            outputs = self.llm.generate(prompts, self.sampling_params)
+            _log.info("🔍 vLLM Debug: Calling llm.generate()...")
+
+            # Check vLLM engine state before generation
+            try:
+                scheduler = (
+                    getattr(self.llm.llm_engine, "scheduler", None)
+                    if hasattr(self.llm, "llm_engine")
+                    else None
+                )
+                engine_stats = {
+                    "waiting_requests": len(getattr(scheduler, "waiting", []))
+                    if scheduler
+                    else "unknown",
+                    "running_requests": len(getattr(scheduler, "running", []))
+                    if scheduler
+                    else "unknown",
+                    "swapped_requests": len(getattr(scheduler, "swapped", []))
+                    if scheduler
+                    else "unknown",
+                    "cache_blocks": getattr(
+                        self.llm.llm_engine, "cache_config", {}
+                    ).get("num_gpu_blocks", "unknown")
+                    if hasattr(self.llm, "llm_engine")
+                    else "unknown",
+                }
+                _log.info(
+                    f"🔍 vLLM Engine State (Batch #{self._batch_counter}): {engine_stats}"
+                )
+
+                # Log warning if there are stuck requests
+                if scheduler and (
+                    len(getattr(scheduler, "running", [])) > 0
+                    or len(getattr(scheduler, "swapped", [])) > 0
+                ):
+                    _log.warning(
+                        f"⚠️ vLLM has {len(getattr(scheduler, 'running', []))} running and {len(getattr(scheduler, 'swapped', []))} swapped requests from previous batches!"
+                    )
+
+            except Exception as state_e:
+                _log.debug(f"Could not inspect engine state: {state_e}")
+
+            # Set up signal-based timeout (5 minutes)
+            import signal
+
+            def timeout_handler(signum, frame):
+                raise TimeoutError(
+                    f"vLLM batch timed out after 5 minutes (Batch #{self._batch_counter})"
+                )
+
+            # Set the timeout
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(300)  # 5 minutes timeout
+
+            try:
+                outputs = self.llm.generate(prompts, self.sampling_params)
+                _log.info(
+                    f"🔍 vLLM Debug: llm.generate() returned {len(outputs)} outputs"
+                )
+            finally:
+                # Always clear the alarm and restore handler
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
 
             # Apply results to pages
             for i, output in enumerate(outputs):
@@ -157,25 +281,65 @@ Return only the content without explanations."""
 
             _log.info(f"✅ vLLM batch complete: {len(outputs)} pages processed")
 
+            # Explicit memory cleanup to prevent accumulation between batches
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    _log.debug("🧹 GPU memory cache cleared")
+            except Exception as cleanup_e:
+                _log.warning(f"Could not clear GPU cache: {cleanup_e}")
+
             # Log GPU metrics after successful batch processing
             if torch.cuda.is_available():
                 try:
                     for i in range(torch.cuda.device_count()):
                         free_mem, total_mem = torch.cuda.mem_get_info(i)
                         used_mem = total_mem - free_mem
-                        utilization = used_mem / total_mem * 100
+                        memory_utilization = used_mem / total_mem * 100
+
+                        # Try to get GPU compute utilization if nvidia-ml-py is available
+                        compute_util = "N/A"
+                        try:
+                            import pynvml
+
+                            pynvml.nvmlInit()
+                            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                            gpu_util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                            compute_util = f"{gpu_util.gpu}%"
+                        except:
+                            pass
+
                         _log.info(
                             f"📊 GPU Metrics (cuda:{i}): "
-                            f"Used: {used_mem / 1024**2:.2f} MiB, "
-                            f"Total: {total_mem / 1024**2:.2f} MiB, "
-                            f"Utilization: {utilization:.2f}%"
+                            f"Memory: {used_mem / 1024**2:.0f}MiB/{total_mem / 1024**2:.0f}MiB ({memory_utilization:.1f}%), "
+                            f"Compute: {compute_util}"
                         )
                 except Exception as gpu_log_e:
                     _log.warning(f"Could not log GPU metrics: {gpu_log_e}")
 
+        except TimeoutError as e:
+            _log.error(f"⏰ {e}")
+            _log.warning(
+                f"🔄 Batch #{self._batch_counter} timed out - vLLM engine may be stuck"
+            )
+            # Clear GPU cache on timeout and continue without VLM processing
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    _log.info("🧹 GPU cache cleared after timeout")
+                except:
+                    pass
         except Exception as e:
             _log.error(f"❌ vLLM batch failed: {e}")
-            # Continue without VLM processing on failure
+            # Clear GPU cache on error and continue without VLM processing
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                except:
+                    pass
 
         yield from pages
 
