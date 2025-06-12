@@ -171,8 +171,8 @@ class VllmBatchVlmModel:
             f"🔄 vLLM batching {len(batch_images)} pages... (Batch #{self._batch_counter})"
         )
 
-        # Prepare batch prompts using correct SmolDocling chat template
-        # From HuggingFace docs: chat_template = f"<|im_start|>User:<image>{PROMPT_TEXT}<end_of_utterance>Assistant:"
+        # Use the proper SmolDocling prompt for DocTags output
+        # This is the idiomatic way from the HuggingFace tutorial and Docling documentation
         chat_template = "<|im_start|>User:<image>Convert this page to docling.<end_of_utterance>Assistant:"
 
         prompts = []
@@ -195,7 +195,7 @@ class VllmBatchVlmModel:
             )
 
         _log.info(
-            f"🔍 vLLM Debug: Processing {len(prompts)} prompts with chat template: {chat_template[:50]}..."
+            f"🔍 vLLM Debug: Processing {len(prompts)} prompts with SmolDocling DocTags format..."
         )
         _log.info(
             f"🔍 vLLM Debug: Sampling params - max_tokens:{self.sampling_params.max_tokens}, temp:{self.sampling_params.temperature}"
@@ -266,20 +266,32 @@ class VllmBatchVlmModel:
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, old_handler)
 
-            # Apply results to pages
+            # Process DocTags output properly - let the standard VLM pipeline parser handle conversion
+            # SmolDocling outputs DocTags format which includes bounding boxes and structure
+            # The standard VLM pipeline has a DocTags parser that will convert this to clean documents
             for i, output in enumerate(outputs):
                 page = batch_pages[i]
-                generated_text = output.outputs[0].text
+                generated_doctags = output.outputs[0].text
 
-                # Use the correct Pydantic models for predictions and response
+                # Log DocTags sample for debugging (first 200 chars)
+                _log.info(
+                    f"Page {page.page_no}: Generated DocTags sample: {generated_doctags[:200]}..."
+                )
+
+                # Store the raw DocTags for the standard VLM pipeline parser to process
+                # This preserves bounding box information and document structure
                 if not hasattr(page, "predictions") or page.predictions is None:
                     page.predictions = PagePredictions()
 
-                page.predictions.vlm_response = VlmPrediction(text=generated_text)
+                page.predictions.vlm_response = VlmPrediction(text=generated_doctags)
 
-                _log.info(f"Page {page.page_no}: Generated {len(generated_text)} chars")
+                _log.info(
+                    f"Page {page.page_no}: Stored DocTags ({len(generated_doctags)} chars) for parser processing"
+                )
 
-            _log.info(f"✅ vLLM batch complete: {len(outputs)} pages processed")
+            _log.info(
+                f"✅ vLLM batch complete: {len(outputs)} pages processed with DocTags format"
+            )
 
             # Explicit memory cleanup to prevent accumulation between batches
             try:
@@ -350,6 +362,9 @@ class VllmBatchVlmPipeline(VlmPipeline):
 
     Inherits from the standard VlmPipeline to reuse its doctags parsing logic,
     and surgically replaces the single-page model call with a batched vLLM implementation.
+
+    This pipeline properly handles SmolDocling's DocTags output format, preserving
+    bounding box information and document structure while eliminating coordinate artifacts.
     """
 
     def __init__(self, pipeline_options: VlmPipelineOptions):
@@ -357,7 +372,7 @@ class VllmBatchVlmPipeline(VlmPipeline):
         # including the crucial doctags parser.
         super().__init__(pipeline_options)
         _log.info(
-            "🔧 Initialized standard VlmPipeline. Now replacing model with vLLM..."
+            "🔧 Initialized standard VlmPipeline with DocTags parser. Now replacing model with vLLM..."
         )
 
         # The VlmPipeline's build_pipe contains a model and a parser.
@@ -367,6 +382,9 @@ class VllmBatchVlmPipeline(VlmPipeline):
             self.build_pipe[0] = VllmBatchVlmModel()
             _log.info(
                 f"✅ Surgically replaced '{original_model_name}' with 'VllmBatchVlmModel'."
+            )
+            _log.info(
+                f"🏷️ DocTags parser retained: {type(self.build_pipe[1]).__name__ if len(self.build_pipe) > 1 else 'None'}"
             )
         else:
             # This case should not be reached in normal operation
